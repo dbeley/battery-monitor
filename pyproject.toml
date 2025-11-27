@@ -17,6 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
+battery-monitor = "battery_monitor.cli:main"
 battery-monitor-collect = "battery_monitor.cli:collect_command"
 battery-monitor-graph = "battery_monitor.cli:graph_command"
 
@@ -29,3 +30,6 @@ packages = ["battery_monitor"]
 [tool.typer.export]
 app = "battery_monitor.cli:app"
 name = "battery-monitor"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
-from datetime import timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -35,17 +33,23 @@ def load_series(db_path: Path, period: str) -> list[db.Sample]:
     return list(db.fetch_samples(db_path, since_ts=since_ts))
 
 
-def render_plot(samples: Iterable[db.Sample], *, show: bool, output: Optional[Path]) -> None:
+def render_plot(
+    samples: Iterable[db.Sample], *, show: bool, output: Optional[Path]
+) -> None:
     samples = list(samples)
     if not samples:
         log.warning("No samples to plot")
         return
 
     percent_points = [
-        (mdates.epoch2num(s.ts), s.percentage) for s in samples if s.percentage is not None
+        (mdates.epoch2num(s.ts), s.percentage)
+        for s in samples
+        if s.percentage is not None
     ]
     health_points = [
-        (mdates.epoch2num(s.ts), s.health_pct) for s in samples if s.health_pct is not None
+        (mdates.epoch2num(s.ts), s.health_pct)
+        for s in samples
+        if s.health_pct is not None
     ]
 
     fig, ax = plt.subplots()

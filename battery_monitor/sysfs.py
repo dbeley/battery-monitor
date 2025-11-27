@@ -49,7 +49,9 @@ def _wh_from_energy(raw_value: Optional[float]) -> Optional[float]:
     return raw_value / 1_000_000.0
 
 
-def find_battery_paths(sysfs_root: Path = Path("/sys/class/power_supply")) -> Iterable[Path]:
+def find_battery_paths(
+    sysfs_root: Path = Path("/sys/class/power_supply"),
+) -> Iterable[Path]:
     for candidate in sysfs_root.iterdir():
         if candidate.name.startswith("BAT"):
             type_file = candidate / "type"
@@ -63,7 +65,9 @@ def find_battery_paths(sysfs_root: Path = Path("/sys/class/power_supply")) -> It
 def read_battery(path: Path) -> BatteryReading:
     energy_now = _read_float(path / "energy_now") or _read_float(path / "charge_now")
     energy_full = _read_float(path / "energy_full") or _read_float(path / "charge_full")
-    energy_full_design = _read_float(path / "energy_full_design") or _read_float(path / "charge_full_design")
+    energy_full_design = _read_float(path / "energy_full_design") or _read_float(
+        path / "charge_full_design"
+    )
     capacity_pct = _read_float(path / "capacity")
     status = _read_str(path / "status")
 

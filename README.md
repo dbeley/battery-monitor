@@ -54,9 +54,13 @@ Supported periods: `last_hour`, `last_day`, `last_week`, `last_month`, `all`.
 
 ## Development
 ```bash
-nix develop          # drops you in a shell with dependencies
-pytest               # run unit tests
+direnv allow                        # optional: auto-load dev shell (needs direnv + nix-direnv)
+nix develop                         # drops you in a fish shell with dependencies
+nix develop -c pytest               # run unit tests
+nix develop -c pre-commit install   # install git hooks (ruff, typos)
+nix develop -c pre-commit run --all-files
 ```
+If you use fish, add `direnv hook fish | source` to your config so the direnv integration works.
 
 ## NixOS integration
 - Add the flake as an input and include `battery-monitor.packages.${system}.default` in `environment.systemPackages`

@@ -22,11 +22,16 @@ def resolve_db_path(db_path: Optional[Path]) -> Path:
         return Path(env).expanduser()
     return DEFAULT_DB_PATH
 
-def collect_once(db_path: Optional[Path] = None, sysfs_root: Optional[Path] = None) -> int:
+
+def collect_once(
+    db_path: Optional[Path] = None, sysfs_root: Optional[Path] = None
+) -> int:
     resolved_db = resolve_db_path(db_path)
     db.init_db(resolved_db)
 
-    battery_paths = list(find_battery_paths(sysfs_root or Path("/sys/class/power_supply")))
+    battery_paths = list(
+        find_battery_paths(sysfs_root or Path("/sys/class/power_supply"))
+    )
     if not battery_paths:
         log.warning("No batteries found in sysfs")
         return 1
@@ -45,7 +50,11 @@ def collect_once(db_path: Optional[Path] = None, sysfs_root: Optional[Path] = No
     return 0
 
 
-def collect_loop(interval_seconds: int, db_path: Optional[Path] = None, sysfs_root: Optional[Path] = None) -> None:
+def collect_loop(
+    interval_seconds: int,
+    db_path: Optional[Path] = None,
+    sysfs_root: Optional[Path] = None,
+) -> None:
     while True:
         collect_once(db_path=db_path, sysfs_root=sysfs_root)
         time.sleep(interval_seconds)

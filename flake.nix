@@ -23,8 +23,12 @@
         packages.default = app;
         apps.default = flake-utils.lib.mkApp { drv = app; };
         devShells.default = pkgs.mkShell {
+          shell = pkgs.fish;
           buildInputs = [
             pkgs.python3
+            pkgs.pre-commit
+            pkgs.ruff
+            pkgs.typos
             pythonPackages.hatchling
             pythonPackages.typer
             pythonPackages.rich
