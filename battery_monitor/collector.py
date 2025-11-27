@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from typer.models import OptionInfo
+
 from . import db
 from .sysfs import find_battery_paths, read_battery
 
@@ -14,8 +16,14 @@ log = logging.getLogger(__name__)
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "battery-monitor" / "battery.db"
 
 
-def resolve_db_path(db_path: Optional[Path]) -> Path:
-    if db_path is not None:
+def resolve_db_path(db_path: Optional[Path | os.PathLike | str]) -> Path:
+    if isinstance(db_path, OptionInfo):
+        db_path = db_path.default
+
+    if isinstance(db_path, (str, os.PathLike)):
+        db_path = Path(db_path)
+
+    if isinstance(db_path, Path):
         return db_path
     env = os.environ.get("BATTERY_MONITOR_DB")
     if env:

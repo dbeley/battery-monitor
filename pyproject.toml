@@ -18,8 +18,8 @@ dependencies = [
 
 [project.scripts]
 battery-monitor = "battery_monitor.cli:main"
-battery-monitor-collect = "battery_monitor.cli:collect_command"
-battery-monitor-graph = "battery_monitor.cli:graph_command"
+battery-monitor-collect = "battery_monitor.cli:main_collect"
+battery-monitor-graph = "battery_monitor.cli:main_graph"
 
 [tool.hatch.metadata]
 allow-direct-references = true

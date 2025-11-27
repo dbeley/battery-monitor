@@ -91,3 +91,11 @@ def main() -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+def main_collect() -> None:  # pragma: no cover - thin Typer wrapper
+    typer.run(collect_command)
+
+
+def main_graph() -> None:  # pragma: no cover - thin Typer wrapper
+    typer.run(graph_command)
