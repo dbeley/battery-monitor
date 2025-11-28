@@ -36,6 +36,7 @@
             pkgs.fontconfig
             pkgs.pre-commit
             pkgs.typos
+            pkgs.hyperfine
           ];
           shellHook = ''
             export RUST_LOG=info
