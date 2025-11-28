@@ -79,3 +79,55 @@ pub fn collect_loop(
         thread::sleep(Duration::from_secs(interval_seconds));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            env::set_var(key, value);
+            EnvGuard { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                env::set_var(self.key, value);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_db_path_prefers_argument() {
+        let _guard = EnvGuard::set("BATTERY_MONITOR_DB", "/tmp/should_not_use.db");
+        let provided = PathBuf::from("/tmp/preferred.db");
+        let resolved = resolve_db_path(Some(&provided));
+        assert_eq!(resolved, provided);
+    }
+
+    #[test]
+    fn resolve_db_path_expands_home_prefix() {
+        let home = dirs::home_dir().expect("home directory not found");
+        let _guard = EnvGuard::set("BATTERY_MONITOR_DB", "~/custom/battery.db");
+        let resolved = resolve_db_path(None);
+        assert_eq!(resolved, home.join("custom").join("battery.db"));
+    }
+
+    #[test]
+    fn resolve_db_path_uses_env_verbatim() {
+        let _guard = EnvGuard::set("BATTERY_MONITOR_DB", "/tmp/from_env.db");
+        let resolved = resolve_db_path(None);
+        assert_eq!(resolved, PathBuf::from("/tmp/from_env.db"));
+    }
+}

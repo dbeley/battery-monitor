@@ -69,61 +69,67 @@ pub fn bucket_start(ts: f64, bucket_seconds: i64) -> DateTime<Local> {
     Local.timestamp_opt(aligned, 0).unwrap()
 }
 
-fn average_rate_w(
-    samples: &[Sample],
-    expect_increase: bool,
-    status_check: fn(&Sample) -> bool,
-) -> Option<f64> {
+#[derive(Debug, Default, PartialEq)]
+pub struct AverageRates {
+    pub discharge_w: Option<f64>,
+    pub charge_w: Option<f64>,
+}
+
+#[derive(Default)]
+struct RateAccumulator {
+    delta: f64,
+    hours: f64,
+}
+
+impl RateAccumulator {
+    fn record(&mut self, delta_wh: f64, dt_hours: f64) {
+        self.delta += delta_wh;
+        self.hours += dt_hours;
+    }
+
+    fn average(&self) -> Option<f64> {
+        if self.hours == 0.0 || self.delta == 0.0 {
+            None
+        } else {
+            Some(self.delta / self.hours)
+        }
+    }
+}
+
+pub fn average_rates(samples: &[Sample]) -> AverageRates {
     const MAX_GAP_HOURS: f64 = 5.0 / 60.0;
 
-    let mut ordered: Vec<Sample> = samples
+    let mut ordered: Vec<&Sample> = samples
         .iter()
         .filter(|s| s.energy_now_wh.is_some())
-        .cloned()
         .collect();
     ordered.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap());
     if ordered.len() < 2 {
-        return None;
+        return AverageRates::default();
     }
 
-    let mut total_delta = 0.0;
-    let mut total_hours = 0.0;
-    let mut previous = ordered[0].clone();
+    let mut discharge = RateAccumulator::default();
+    let mut charge = RateAccumulator::default();
 
-    for current in ordered.iter().skip(1) {
+    for pair in ordered.windows(2) {
+        let (previous, current) = (pair[0], pair[1]);
         let dt_hours = (current.ts - previous.ts) / 3600.0;
         if dt_hours <= 0.0 || dt_hours > MAX_GAP_HOURS {
-            previous = current.clone();
-            continue;
-        }
-        if !(status_check(&previous) && status_check(current)) {
-            previous = current.clone();
             continue;
         }
 
         let delta = current.energy_now_wh.unwrap() - previous.energy_now_wh.unwrap();
-        if expect_increase {
-            if delta <= 0.0 {
-                previous = current.clone();
-                continue;
-            }
-            total_delta += delta;
-        } else {
-            if delta >= 0.0 {
-                previous = current.clone();
-                continue;
-            }
-            total_delta += -delta;
+        if delta > 0.0 && is_charging(previous) && is_charging(current) {
+            charge.record(delta, dt_hours);
+        } else if delta < 0.0 && is_discharging(previous) && is_discharging(current) {
+            discharge.record(-delta, dt_hours);
         }
-        total_hours += dt_hours;
-        previous = current.clone();
     }
 
-    if total_hours == 0.0 || total_delta == 0.0 {
-        return None;
+    AverageRates {
+        discharge_w: discharge.average(),
+        charge_w: charge.average(),
     }
-    let avg_delta_per_hour = total_delta / total_hours;
-    Some(avg_delta_per_hour)
 }
 
 fn is_discharging(sample: &Sample) -> bool {
@@ -143,11 +149,11 @@ fn is_charging(sample: &Sample) -> bool {
 }
 
 pub fn average_discharge_w(samples: &[Sample]) -> Option<f64> {
-    average_rate_w(samples, false, is_discharging)
+    average_rates(samples).discharge_w
 }
 
 pub fn average_charge_w(samples: &[Sample]) -> Option<f64> {
-    average_rate_w(samples, true, is_charging)
+    average_rates(samples).charge_w
 }
 
 pub fn estimate_runtime_hours(
@@ -275,6 +281,21 @@ mod tests {
         ];
         let avg = average_charge_w(&samples).unwrap();
         assert!((avg - 16.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn average_rates_compute_charge_and_discharge_together() {
+        let samples = vec![
+            sample(0.0, 50.0, Some(60.0), Some(70.0), Some("Charging")),
+            sample(300.0, 51.0, Some(60.0), Some(70.0), Some("Charging")),
+            sample(600.0, 52.0, Some(60.0), Some(70.0), Some("Charging")),
+            sample(900.0, 51.5, Some(60.0), Some(70.0), Some("Discharging")),
+            sample(1200.0, 51.0, Some(60.0), Some(70.0), Some("Discharging")),
+        ];
+
+        let rates = average_rates(&samples);
+        assert!((rates.charge_w.unwrap() - 12.0).abs() < 0.01);
+        assert!((rates.discharge_w.unwrap() - 6.0).abs() < 0.01);
     }
 
     #[test]

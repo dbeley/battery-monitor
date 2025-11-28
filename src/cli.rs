@@ -11,8 +11,8 @@ use chrono::{DateTime, Local, TimeZone};
 
 use crate::aggregate::{aggregate_group, aggregate_samples_by_timestamp};
 use crate::cli_helpers::{
-    average_charge_w, average_discharge_w, bucket_span_seconds, bucket_start, default_graph_path,
-    estimate_runtime_hours, format_runtime,
+    average_rates, bucket_span_seconds, bucket_start, default_graph_path, estimate_runtime_hours,
+    format_runtime,
 };
 use crate::collector::{collect_loop, collect_once, resolve_db_path};
 use crate::db::{self, Sample};
@@ -189,8 +189,9 @@ fn summarize(
     recent_samples: &[Sample],
 ) {
     let timeframe_label = timeframe.label.replace('_', " ");
-    let avg_discharge_w = average_discharge_w(timeframe_samples);
-    let avg_charge_w = average_charge_w(timeframe_samples);
+    let rates = average_rates(timeframe_samples);
+    let avg_discharge_w = rates.discharge_w;
+    let avg_charge_w = rates.charge_w;
     let est_runtime_hours = estimate_runtime_hours(avg_discharge_w, latest_sample);
 
     let mut summary = Table::new();
@@ -359,16 +360,15 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
             .last()
             .and_then(|s| s.status.clone())
             .unwrap_or_else(|| "unknown".to_string());
-        let avg_discharge = average_discharge_w(&bucket_samples);
-        let avg_charge = average_charge_w(&bucket_samples);
+        let rates = average_rates(&bucket_samples);
         report.add_row(vec![
             format_bucket(bucket_start, bucket_seconds),
             bucket_samples.len().to_string(),
             min_pct,
             avg_pct,
             max_pct,
-            format_power(avg_discharge),
-            format_power(avg_charge),
+            format_power(rates.discharge_w),
+            format_power(rates.charge_w),
             latest_status,
         ]);
     }
