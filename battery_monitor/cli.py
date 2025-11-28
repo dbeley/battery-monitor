@@ -123,7 +123,6 @@ def report_command(
         console.print("No records available; collect data first.")
         raise typer.Exit(code=1)
 
-    total_events = db.count_events(resolved)
     since_ts = since_timestamp(timeframe)
     raw_samples = list(db.fetch_samples(resolved, since_ts=since_ts))
     samples = aggregate_samples_by_timestamp(raw_samples)
@@ -156,7 +155,6 @@ def report_command(
         samples,
         timeframe,
         total_records=total_records,
-        total_events=total_events,
         first_sample=first_sample,
         latest_sample=latest_sample,
         recent_samples=recent_samples,
@@ -168,7 +166,6 @@ def summarize(
     timeframe: Timeframe,
     *,
     total_records: int,
-    total_events: int,
     first_sample: Optional[db.Sample],
     latest_sample: db.Sample,
     recent_samples: list[db.Sample],
@@ -188,8 +185,6 @@ def summarize(
     summary.add_column("Field")
     summary.add_column("Value")
     summary.add_row("Records (all)", str(total_records))
-    summary.add_row("Events (all)", str(total_events))
-    summary.add_row("Events (timeframe)", str(len(timeframe_samples)))
     first_ts = first_sample.ts if first_sample else last.ts
     summary.add_row("First record ts", _format_timestamp(first_ts))
     summary.add_row("Latest record ts", _format_timestamp(last.ts))
