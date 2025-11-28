@@ -13,7 +13,7 @@ Battery collector + graph/report tools for Linux (tested on NixOS). Collects bat
 ```bash
 nix run . -- collect --help
 nix run . -- collect                  # one-shot collection
-nix run . -- report --timeframe last_day --output battery.png
+nix run . -- report --timeframe last_day --graph
 ```
 
 ## Database location
@@ -43,11 +43,14 @@ battery-monitor-collect
 # Collect repeatedly (60s interval)
 battery-monitor-collect --interval 60
 
-# Report last day and save graph to png
-battery-monitor-report --timeframe last_day --output ~/battery-day.png
+# Report last day and save graph with an auto-generated name in the cwd
+battery-monitor-report --timeframe last_day --graph
+
+# Report last week and send the graph to a specific path
+battery-monitor-report --timeframe last_week --graph-path ~/battery-week.png
 ```
 
-Use `--output` to save a graph image; without it the command prints only the textual report.
+Use `--graph` to save a graph image with an informative filename (timeframe, record count, timestamp, timezone) in the current directory. Use `--graph-path` to choose the exact destination; without either flag the command prints only the textual report.
 
 Supported timeframes (`--timeframe`): `last_3h`, `last_12h`, `last_day`, `last_week`, `all`.
 

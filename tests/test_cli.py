@@ -8,3 +8,15 @@ def test_last_day_buckets_are_hourly():
 
     assert bucket.hour == sample_dt.hour  # no 2-hour grouping
     assert (bucket.minute, bucket.second, bucket.microsecond) == (0, 0, 0)
+
+
+def test_default_graph_path_has_timeframe_and_timestamp(tmp_path):
+    from datetime import datetime, timezone
+
+    from battery_monitor.cli import _default_graph_path
+
+    now = datetime(2025, 11, 28, 1, 30, 42, tzinfo=timezone.utc)
+    path = _default_graph_path("last-3h", base_dir=tmp_path, now=now)
+
+    assert path.parent == tmp_path
+    assert path.name == "battery_monitor_last_3h_2025-11-28_01-30-42_UTC.png"

@@ -27,6 +27,25 @@ def configure_logging(verbose: bool) -> None:
     )
 
 
+def _sanitize_component(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value)
+
+
+def _default_graph_path(
+    timeframe: str,
+    *,
+    base_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> Path:
+    """Generate an informative, safe graph filename."""
+    current = now or datetime.now().astimezone()
+    tz_name = _sanitize_component(current.tzname() or "local")
+    timeframe_label = timeframe.replace("-", "_")
+    timestamp = current.strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"battery_monitor_{timeframe_label}_{timestamp}_{tz_name}.png"
+    return (base_dir or Path.cwd()) / filename
+
+
 @app.command("collect")
 def collect_command(
     db_path: Optional[Path] = typer.Option(
@@ -54,12 +73,17 @@ def report_command(
     db_path: Optional[Path] = typer.Option(
         None, help="Path to SQLite database (or set BATTERY_MONITOR_DB)"
     ),
-    output: Optional[Path] = typer.Option(
-        None, help="Optional output image path (png/pdf/etc)"
+    graph: bool = typer.Option(
+        False, "--graph", "-g", help="Save a graph image with an auto-generated name"
+    ),
+    graph_path: Optional[Path] = typer.Option(
+        None,
+        "--graph-path",
+        help="Custom path for the graph image (png/pdf/etc); overrides --graph name",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
-    """Render a timeframe report (optionally save a graph to --output)."""
+    """Render a timeframe report (optionally save a graph image)."""
     configure_logging(verbose)
     resolved = resolve_db_path(db_path)
 
@@ -75,8 +99,16 @@ def report_command(
         )
         raise typer.Exit(code=1)
 
-    if output:
-        render_plot(samples, show=False, output=output)
+    output_path: Optional[Path]
+    if graph_path:
+        output_path = graph_path
+    elif graph:
+        output_path = _default_graph_path(timeframe)
+    else:
+        output_path = None
+
+    if output_path:
+        render_plot(samples, show=False, output=output_path)
     summarize(samples, all_samples, timeframe)
 
 
