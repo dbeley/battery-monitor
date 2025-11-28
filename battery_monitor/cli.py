@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional, TYPE_CHECKING
@@ -175,6 +176,8 @@ def summarize(
     timeframe_samples = list(timeframe_samples)
     last = latest_sample
     timeframe_label = timeframe.label.replace("_", " ")
+    avg_consumption_w = _average_consumption_w(timeframe_samples)
+    est_runtime_hours = _estimate_runtime_hours(avg_consumption_w, current_sample=last)
 
     summary = Table(
         title="Database stats",
@@ -192,6 +195,8 @@ def summarize(
     summary.add_row("Latest record ts", _format_timestamp(last.ts))
     summary.add_row("Timeframe window", timeframe_label)
     summary.add_row("Latest status", last.status or "unknown")
+    summary.add_row("Avg consumption", _format_power(avg_consumption_w))
+    summary.add_row("Est runtime (full)", _format_runtime(est_runtime_hours))
     console.print(summary)
 
     console.print(_recent_table(recent_samples))
@@ -206,6 +211,18 @@ def _format_timestamp(ts: float) -> str:
 
 def _format_pct(value: Optional[float]) -> str:
     return f"{value:.1f}%" if value is not None else "--"
+
+
+def _format_power(value: Optional[float]) -> str:
+    return f"{value:.2f}W" if value is not None else "--"
+
+
+def _format_runtime(hours: Optional[float]) -> str:
+    if hours is None or hours < 0 or math.isinf(hours) or math.isnan(hours):
+        return "--"
+    minutes = int(hours * 60)
+    hrs, mins = divmod(minutes, 60)
+    return f"{hrs}h{mins:02d}m"
 
 
 def _latest_table(sample: db.Sample) -> Table:
@@ -269,6 +286,7 @@ def _timeframe_report_table(timeframe: Timeframe, samples: list[db.Sample]) -> T
     report.add_column("Min %", justify="right")
     report.add_column("Avg %", justify="right")
     report.add_column("Max %", justify="right")
+    report.add_column("Avg W", justify="right")
     report.add_column("Latest status", no_wrap=True)
 
     for bucket_start in sorted(buckets):
@@ -277,12 +295,14 @@ def _timeframe_report_table(timeframe: Timeframe, samples: list[db.Sample]) -> T
         pct_values = [s.percentage for s in bucket_samples if s.percentage is not None]
         min_pct, avg_pct, max_pct = _pct_stats(pct_values)
         latest_status = bucket_samples[-1].status or "unknown"
+        avg_consumption = _average_consumption_w(bucket_samples)
         report.add_row(
             window_label,
             str(len(bucket_samples)),
             min_pct,
             avg_pct,
             max_pct,
+            _format_power(avg_consumption),
             latest_status,
         )
     return report
@@ -339,6 +359,51 @@ def _pct_stats(values: list[float]) -> tuple[str, str, str]:
 
 def _format_number(value: Optional[float]) -> str:
     return f"{value:.2f}" if value is not None else "--"
+
+
+def _average_consumption_w(samples: Iterable[db.Sample]) -> Optional[float]:
+    # Ignore deltas when samples are far apart (likely machine was off/asleep).
+    max_gap_hours = 5 / 60  # only trust 5-minute gaps to ensure the machine was active
+    ordered = sorted(
+        (s for s in samples if s.energy_now_wh is not None),
+        key=lambda sample: sample.ts,
+    )
+    if len(ordered) < 2:
+        return None
+
+    total_delta = 0.0
+    total_hours = 0.0
+    previous = ordered[0]
+
+    for current in ordered[1:]:
+        dt_hours = (current.ts - previous.ts) / 3600
+        if dt_hours <= 0:
+            previous = current
+            continue
+        if dt_hours > max_gap_hours:
+            previous = current
+            continue
+        delta_energy = current.energy_now_wh - previous.energy_now_wh
+        total_delta += delta_energy
+        total_hours += dt_hours
+        previous = current
+
+    if total_hours == 0:
+        return None
+
+    avg_delta_per_hour = total_delta / total_hours
+    return -avg_delta_per_hour  # positive when battery drains
+
+
+def _estimate_runtime_hours(
+    avg_consumption_w: Optional[float], *, current_sample: db.Sample
+) -> Optional[float]:
+    if avg_consumption_w is None or avg_consumption_w <= 0:
+        return None
+    capacity_wh = current_sample.energy_full_wh or current_sample.energy_full_design_wh
+    if capacity_wh is None or capacity_wh <= 0:
+        return None
+    return capacity_wh / avg_consumption_w
 
 
 def main() -> None:
