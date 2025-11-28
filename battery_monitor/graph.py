@@ -6,30 +6,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
-
 from . import db
+from .timeframe import timeframe_seconds
 
 log = logging.getLogger(__name__)
 
 
-def _timeframe_seconds(timeframe: str) -> Optional[float]:
-    normalized = timeframe.lower().replace("-", "_")
-    mapping = {
-        "last_3h": 3 * 3600,
-        "last_12h": 12 * 3600,
-        "last_day": 86400,
-        "last_week": 7 * 86400,
-        "all": None,
-    }
-    if normalized not in mapping:
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
-    return mapping[normalized]
-
-
 def load_series(db_path: Path, timeframe: str) -> list[db.Sample]:
-    seconds = _timeframe_seconds(timeframe)
+    seconds = timeframe_seconds(timeframe)
     since_ts = time.time() - seconds if seconds is not None else None
     return list(db.fetch_samples(db_path, since_ts=since_ts))
 
@@ -37,6 +21,15 @@ def load_series(db_path: Path, timeframe: str) -> list[db.Sample]:
 def render_plot(
     samples: Iterable[db.Sample], *, show: bool, output: Optional[Path]
 ) -> None:
+    import matplotlib
+
+    # Skip GUI backends when we only need file output; it shortens import time.
+    if not show:
+        matplotlib.use("Agg", force=True)
+
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
     samples = list(samples)
     if not samples:
         log.warning("No records to plot")

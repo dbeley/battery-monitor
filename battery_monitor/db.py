@@ -73,6 +73,31 @@ def insert_samples(db_path: Path, samples: Iterable[Sample]) -> None:
         conn.commit()
 
 
+def count_samples(db_path: Path, since_ts: Optional[float] = None) -> int:
+    with sqlite3.connect(db_path) as conn:
+        if since_ts is None:
+            (count,) = conn.execute("SELECT COUNT(*) FROM samples").fetchone()
+        else:
+            (count,) = conn.execute(
+                "SELECT COUNT(*) FROM samples WHERE ts >= ?", (since_ts,)
+            ).fetchone()
+        return int(count)
+
+
+def _row_to_sample(row: sqlite3.Row) -> Sample:
+    return Sample(
+        ts=row["ts"],
+        percentage=row["percentage"],
+        capacity_pct=row["capacity_pct"],
+        health_pct=row["health_pct"],
+        energy_now_wh=row["energy_now_wh"],
+        energy_full_wh=row["energy_full_wh"],
+        energy_full_design_wh=row["energy_full_design_wh"],
+        status=row["status"],
+        source_path=row["source_path"],
+    )
+
+
 def fetch_samples(db_path: Path, since_ts: Optional[float] = None) -> Iterator[Sample]:
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -83,17 +108,30 @@ def fetch_samples(db_path: Path, since_ts: Optional[float] = None) -> Iterator[S
                 "SELECT * FROM samples WHERE ts >= ? ORDER BY ts", (since_ts,)
             ).fetchall()
         for row in rows:
-            yield Sample(
-                ts=row["ts"],
-                percentage=row["percentage"],
-                capacity_pct=row["capacity_pct"],
-                health_pct=row["health_pct"],
-                energy_now_wh=row["energy_now_wh"],
-                energy_full_wh=row["energy_full_wh"],
-                energy_full_design_wh=row["energy_full_design_wh"],
-                status=row["status"],
-                source_path=row["source_path"],
-            )
+            yield _row_to_sample(row)
+
+
+def fetch_first_sample(db_path: Path) -> Optional[Sample]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM samples ORDER BY ts ASC LIMIT 1").fetchone()
+        return _row_to_sample(row) if row else None
+
+
+def fetch_latest_sample(db_path: Path) -> Optional[Sample]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM samples ORDER BY ts DESC LIMIT 1").fetchone()
+        return _row_to_sample(row) if row else None
+
+
+def fetch_recent_samples(db_path: Path, limit: int = 5) -> list[Sample]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM samples ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [_row_to_sample(row) for row in rows]
 
 
 def create_sample_from_reading(reading, ts: Optional[float] = None) -> Sample:
