@@ -204,7 +204,7 @@ fn export_raw_data(samples: &[Sample], format: &str) -> Result<()> {
 fn export_csv(samples: &[Sample]) -> Result<()> {
     // Print CSV header
     println!("timestamp,datetime,percentage,capacity_pct,health_pct,energy_now_wh,energy_full_wh,energy_full_design_wh,status,source_path");
-    
+
     // Print each sample as a CSV row
     for sample in samples {
         let dt = Local.timestamp_opt(sample.ts as i64, 0).unwrap();
@@ -212,12 +212,30 @@ fn export_csv(samples: &[Sample]) -> Result<()> {
             "{},{},{},{},{},{},{},{},{},{}",
             sample.ts,
             dt.format("%Y-%m-%d %H:%M:%S"),
-            sample.percentage.map(|v| format!("{:.2}", v)).unwrap_or_default(),
-            sample.capacity_pct.map(|v| format!("{:.2}", v)).unwrap_or_default(),
-            sample.health_pct.map(|v| format!("{:.2}", v)).unwrap_or_default(),
-            sample.energy_now_wh.map(|v| format!("{:.2}", v)).unwrap_or_default(),
-            sample.energy_full_wh.map(|v| format!("{:.2}", v)).unwrap_or_default(),
-            sample.energy_full_design_wh.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+            sample
+                .percentage
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .capacity_pct
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .health_pct
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .energy_now_wh
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .energy_full_wh
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .energy_full_design_wh
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
             sample.status.as_deref().unwrap_or(""),
             sample.source_path
         );
@@ -228,52 +246,56 @@ fn export_csv(samples: &[Sample]) -> Result<()> {
 fn export_json(samples: &[Sample]) -> Result<()> {
     use std::io::stdout;
     let mut output = stdout();
-    
+
     writeln!(output, "[")?;
     for (i, sample) in samples.iter().enumerate() {
         let dt = Local.timestamp_opt(sample.ts as i64, 0).unwrap();
         let comma = if i < samples.len() - 1 { "," } else { "" };
-        
+
         writeln!(output, "  {{")?;
         writeln!(output, "    \"timestamp\": {},", sample.ts)?;
-        writeln!(output, "    \"datetime\": \"{}\",", dt.format("%Y-%m-%d %H:%M:%S"))?;
-        
+        writeln!(
+            output,
+            "    \"datetime\": \"{}\",",
+            dt.format("%Y-%m-%d %H:%M:%S")
+        )?;
+
         if let Some(v) = sample.percentage {
             writeln!(output, "    \"percentage\": {:.2},", v)?;
         } else {
             writeln!(output, "    \"percentage\": null,")?;
         }
-        
+
         if let Some(v) = sample.capacity_pct {
             writeln!(output, "    \"capacity_pct\": {:.2},", v)?;
         } else {
             writeln!(output, "    \"capacity_pct\": null,")?;
         }
-        
+
         if let Some(v) = sample.health_pct {
             writeln!(output, "    \"health_pct\": {:.2},", v)?;
         } else {
             writeln!(output, "    \"health_pct\": null,")?;
         }
-        
+
         if let Some(v) = sample.energy_now_wh {
             writeln!(output, "    \"energy_now_wh\": {:.2},", v)?;
         } else {
             writeln!(output, "    \"energy_now_wh\": null,")?;
         }
-        
+
         if let Some(v) = sample.energy_full_wh {
             writeln!(output, "    \"energy_full_wh\": {:.2},", v)?;
         } else {
             writeln!(output, "    \"energy_full_wh\": null,")?;
         }
-        
+
         if let Some(v) = sample.energy_full_design_wh {
             writeln!(output, "    \"energy_full_design_wh\": {:.2},", v)?;
         } else {
             writeln!(output, "    \"energy_full_design_wh\": null,")?;
         }
-        
+
         writeln!(
             output,
             "    \"status\": {},",
@@ -283,7 +305,7 @@ fn export_json(samples: &[Sample]) -> Result<()> {
                 "null".to_string()
             }
         )?;
-        
+
         writeln!(output, "    \"source_path\": \"{}\"", sample.source_path)?;
         writeln!(output, "  }}{}", comma)?;
     }
@@ -442,5 +464,59 @@ fn format_bucket(dt: DateTime<Local>, bucket_seconds: i64) -> String {
         } else {
             format!("{} (+{days}d)", dt.format("%Y-%m-%d"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_sample() -> Sample {
+        Sample {
+            ts: 1700000000.0,
+            percentage: Some(75.5),
+            capacity_pct: Some(90.0),
+            health_pct: Some(85.0),
+            energy_now_wh: Some(50.0),
+            energy_full_wh: Some(60.0),
+            energy_full_design_wh: Some(70.0),
+            status: Some("Discharging".to_string()),
+            source_path: "BAT0".to_string(),
+        }
+    }
+
+    #[test]
+    fn export_csv_produces_valid_output() {
+        let samples = vec![test_sample()];
+        let result = export_csv(&samples);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_json_produces_valid_output() {
+        let samples = vec![test_sample()];
+        let result = export_json(&samples);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_raw_data_accepts_csv_format() {
+        let samples = vec![test_sample()];
+        let result = export_raw_data(&samples, "csv");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_raw_data_accepts_json_format() {
+        let samples = vec![test_sample()];
+        let result = export_raw_data(&samples, "json");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_raw_data_rejects_invalid_format() {
+        let samples = vec![test_sample()];
+        let result = export_raw_data(&samples, "xml");
+        assert!(result.is_err());
     }
 }
