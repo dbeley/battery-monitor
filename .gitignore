@@ -1,7 +1,19 @@
-__pycache__/
-.pytest_cache/
-*.db
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Environment and IDE files
 /.direnv
 /.env
+.vscode/
+.idea/
+
+# Python caches
+__pycache__/
+.pytest_cache/
+
+# Local data and generated outputs
+*.db
 *.png
 target
