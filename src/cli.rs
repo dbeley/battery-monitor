@@ -8,7 +8,7 @@ use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL_CONDENSED;
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
 
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
 
 use crate::aggregate::aggregate_samples_by_timestamp;
 use crate::cli_helpers::{
@@ -65,6 +65,12 @@ pub enum Commands {
         /// Custom path for the graph image (png/pdf/etc); overrides --graph name
         #[arg(long = "graph-path")]
         graph_path: Option<PathBuf>,
+        /// Export raw data to stdout
+        #[arg(long = "raw")]
+        raw: bool,
+        /// Output format for raw data export (csv or json)
+        #[arg(long = "format", default_value = "csv", value_parser = ["csv", "json"])]
+        format: String,
         /// Enable debug logging
         #[arg(short, long)]
         verbose: bool,
@@ -112,6 +118,8 @@ where
             db_path,
             graph: graph_flag,
             graph_path,
+            raw,
+            format,
             verbose,
         } => {
             configure_logging(verbose);
@@ -135,21 +143,25 @@ where
                 std::process::exit(1);
             }
 
-            let output_path = match (graph_path, graph_flag) {
-                (Some(path), _) => Some(path),
-                (None, true) => Some(default_graph_path(
-                    &timeframe.label,
-                    None,
-                    Some(Local::now()),
-                )),
-                _ => None,
-            };
+            if raw {
+                export_raw_data(&samples, &format)?;
+            } else {
+                let output_path = match (graph_path, graph_flag) {
+                    (Some(path), _) => Some(path),
+                    (None, true) => Some(default_graph_path(
+                        &timeframe.label,
+                        None,
+                        Some(Local::now()),
+                    )),
+                    _ => None,
+                };
 
-            if let Some(path) = output_path {
-                graph::render_plot(&samples, &timeframe, &path)?;
+                if let Some(path) = output_path {
+                    graph::render_plot(&samples, &timeframe, &path)?;
+                }
+
+                summarize(&samples, &timeframe, timeframe_record_count);
             }
-
-            summarize(&samples, &timeframe, timeframe_record_count);
         }
     }
     Ok(())
@@ -170,6 +182,7 @@ fn summarize(timeframe_samples: &[Sample], timeframe: &Timeframe, timeframe_reco
             timeframe_records,
             rates.discharge_w,
             rates.charge_w,
+            rates.power_consumption_w,
             est_runtime_hours
         )
     );
@@ -178,6 +191,132 @@ fn summarize(timeframe_samples: &[Sample], timeframe: &Timeframe, timeframe_reco
         timeframe.label.replace('_', " "),
         timeframe_report_table(timeframe, timeframe_samples)
     );
+}
+
+fn export_raw_data(samples: &[Sample], format: &str) -> Result<()> {
+    match format {
+        "csv" => export_csv(samples),
+        "json" => export_json(samples),
+        _ => anyhow::bail!("Unsupported format: {}", format),
+    }
+}
+
+fn export_csv(samples: &[Sample]) -> Result<()> {
+    // Print CSV header
+    println!("timestamp,datetime,percentage,capacity_pct,health_pct,energy_now_wh,energy_full_wh,energy_full_design_wh,status,source_path");
+
+    // Print each sample as a CSV row
+    for sample in samples {
+        let dt = Local
+            .timestamp_opt(sample.ts as i64, 0)
+            .single()
+            .ok_or_else(|| anyhow::anyhow!("Invalid timestamp: {}", sample.ts))?;
+        println!(
+            "{},{},{},{},{},{},{},{},{},{}",
+            sample.ts,
+            dt.format("%Y-%m-%d %H:%M:%S"),
+            sample
+                .percentage
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .capacity_pct
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .health_pct
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .energy_now_wh
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .energy_full_wh
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample
+                .energy_full_design_wh
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_default(),
+            sample.status.as_deref().unwrap_or(""),
+            sample.source_path
+        );
+    }
+    Ok(())
+}
+
+fn export_json(samples: &[Sample]) -> Result<()> {
+    use std::io::stdout;
+    let mut output = stdout();
+
+    writeln!(output, "[")?;
+    for (i, sample) in samples.iter().enumerate() {
+        let dt = Local
+            .timestamp_opt(sample.ts as i64, 0)
+            .single()
+            .ok_or_else(|| anyhow::anyhow!("Invalid timestamp: {}", sample.ts))?;
+        let comma = if i < samples.len() - 1 { "," } else { "" };
+
+        writeln!(output, "  {{")?;
+        writeln!(output, "    \"timestamp\": {},", sample.ts)?;
+        writeln!(
+            output,
+            "    \"datetime\": \"{}\",",
+            dt.format("%Y-%m-%d %H:%M:%S")
+        )?;
+
+        if let Some(v) = sample.percentage {
+            writeln!(output, "    \"percentage\": {:.2},", v)?;
+        } else {
+            writeln!(output, "    \"percentage\": null,")?;
+        }
+
+        if let Some(v) = sample.capacity_pct {
+            writeln!(output, "    \"capacity_pct\": {:.2},", v)?;
+        } else {
+            writeln!(output, "    \"capacity_pct\": null,")?;
+        }
+
+        if let Some(v) = sample.health_pct {
+            writeln!(output, "    \"health_pct\": {:.2},", v)?;
+        } else {
+            writeln!(output, "    \"health_pct\": null,")?;
+        }
+
+        if let Some(v) = sample.energy_now_wh {
+            writeln!(output, "    \"energy_now_wh\": {:.2},", v)?;
+        } else {
+            writeln!(output, "    \"energy_now_wh\": null,")?;
+        }
+
+        if let Some(v) = sample.energy_full_wh {
+            writeln!(output, "    \"energy_full_wh\": {:.2},", v)?;
+        } else {
+            writeln!(output, "    \"energy_full_wh\": null,")?;
+        }
+
+        if let Some(v) = sample.energy_full_design_wh {
+            writeln!(output, "    \"energy_full_design_wh\": {:.2},", v)?;
+        } else {
+            writeln!(output, "    \"energy_full_design_wh\": null,")?;
+        }
+
+        writeln!(
+            output,
+            "    \"status\": {},",
+            if let Some(ref s) = sample.status {
+                format!("\"{}\"", s)
+            } else {
+                "null".to_string()
+            }
+        )?;
+
+        writeln!(output, "    \"source_path\": \"{}\"", sample.source_path)?;
+        writeln!(output, "  }}{}", comma)?;
+    }
+    writeln!(output, "]")?;
+    Ok(())
 }
 
 fn format_power(value: Option<f64>) -> String {
@@ -230,6 +369,7 @@ fn timeframe_summary_table(
     timeframe_records: usize,
     avg_discharge_w: Option<f64>,
     avg_charge_w: Option<f64>,
+    avg_power_consumption_w: Option<f64>,
     est_runtime_hours: Option<f64>,
 ) -> Table {
     let mut table = themed_table();
@@ -245,6 +385,10 @@ fn timeframe_summary_table(
     table.add_row(vec![
         label_cell("Avg charge power"),
         value_cell(format_power(avg_charge_w)),
+    ]);
+    table.add_row(vec![
+        label_cell("Avg power consumption"),
+        value_cell(format_power(avg_power_consumption_w)),
     ]);
     table.add_row(vec![
         label_cell("Est runtime (full)"),
@@ -271,6 +415,7 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
         "Max %",
         "Avg discharge W",
         "Avg charge W",
+        "Avg power W",
         "Latest status",
     ]));
 
@@ -292,6 +437,7 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
             value_cell(max_pct),
             value_cell(format_power(rates.discharge_w)),
             value_cell(format_power(rates.charge_w)),
+            value_cell(format_power(rates.power_consumption_w)),
             status_cell(Some(latest_status)),
         ]);
     }
@@ -324,5 +470,59 @@ fn format_bucket(dt: DateTime<Local>, bucket_seconds: i64) -> String {
         } else {
             format!("{} (+{days}d)", dt.format("%Y-%m-%d"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_sample() -> Sample {
+        Sample {
+            ts: 1700000000.0,
+            percentage: Some(75.5),
+            capacity_pct: Some(90.0),
+            health_pct: Some(85.0),
+            energy_now_wh: Some(50.0),
+            energy_full_wh: Some(60.0),
+            energy_full_design_wh: Some(70.0),
+            status: Some("Discharging".to_string()),
+            source_path: "BAT0".to_string(),
+        }
+    }
+
+    #[test]
+    fn export_csv_produces_valid_output() {
+        let samples = vec![test_sample()];
+        let result = export_csv(&samples);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_json_produces_valid_output() {
+        let samples = vec![test_sample()];
+        let result = export_json(&samples);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_raw_data_accepts_csv_format() {
+        let samples = vec![test_sample()];
+        let result = export_raw_data(&samples, "csv");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_raw_data_accepts_json_format() {
+        let samples = vec![test_sample()];
+        let result = export_raw_data(&samples, "json");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn export_raw_data_rejects_invalid_format() {
+        let samples = vec![test_sample()];
+        let result = export_raw_data(&samples, "xml");
+        assert!(result.is_err());
     }
 }

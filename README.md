@@ -7,6 +7,9 @@ Battery collector + graph/report tools for Linux (tested on NixOS). Collects bat
 - SQLite storage (bundled driver) with quick aggregate helpers
 - CLI binaries: `battery-monitor`, `battery-monitor-collect`, and `battery-monitor-report`
 - PNG graphs rendered with Plotters; filenames auto-encode timeframe + timestamp + timezone
+- **Power consumption tracking** - shows average power draw regardless of battery state (charging/discharging)
+- **Dynamic bucket sizing** - 10-minute buckets for timeframes < 6 hours, larger buckets for longer periods
+- **Raw data export** - export battery metrics as CSV or JSON for further analysis
 - Sample systemd service/timer for periodic sampling
 - Nix flake for installation and a Rust dev shell
 
@@ -61,6 +64,12 @@ battery-monitor-report --days 1 --graph
 
 # Report last week and send the graph to a specific path
 battery-monitor-report --days 7 --graph-path ~/battery-week.png
+
+# Export raw data as CSV (default format)
+battery-monitor-report --days 1 --raw > report.csv
+
+# Export raw data as JSON
+battery-monitor-report --days 1 --raw --format json > report.json
 ```
 
 Use `--graph` to save a graph image with an informative filename in the current directory. Use `--graph-path` for a custom destination; without either flag the command prints only the textual report.
@@ -69,6 +78,12 @@ Timeframe controls:
 - `--hours N` (default 6) when `--days/--months` are zero
 - `--days N` overrides hours; `--months N` (~30 days each) overrides both
 - `--all` shows the full history
+
+Raw data export:
+- `--raw` enables raw data export to stdout (bypasses normal report output)
+- `--format csv` (default) exports comma-separated values with headers
+- `--format json` exports structured JSON array
+- Respects the same timeframe filters as graph reports
 
 ## Development
 ```bash
