@@ -170,6 +170,7 @@ fn summarize(timeframe_samples: &[Sample], timeframe: &Timeframe, timeframe_reco
             timeframe_records,
             rates.discharge_w,
             rates.charge_w,
+            rates.power_consumption_w,
             est_runtime_hours
         )
     );
@@ -230,6 +231,7 @@ fn timeframe_summary_table(
     timeframe_records: usize,
     avg_discharge_w: Option<f64>,
     avg_charge_w: Option<f64>,
+    avg_power_consumption_w: Option<f64>,
     est_runtime_hours: Option<f64>,
 ) -> Table {
     let mut table = themed_table();
@@ -245,6 +247,10 @@ fn timeframe_summary_table(
     table.add_row(vec![
         label_cell("Avg charge power"),
         value_cell(format_power(avg_charge_w)),
+    ]);
+    table.add_row(vec![
+        label_cell("Avg power consumption"),
+        value_cell(format_power(avg_power_consumption_w)),
     ]);
     table.add_row(vec![
         label_cell("Est runtime (full)"),
@@ -271,6 +277,7 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
         "Max %",
         "Avg discharge W",
         "Avg charge W",
+        "Avg power W",
         "Latest status",
     ]));
 
@@ -292,6 +299,7 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
             value_cell(max_pct),
             value_cell(format_power(rates.discharge_w)),
             value_cell(format_power(rates.charge_w)),
+            value_cell(format_power(rates.power_consumption_w)),
             status_cell(Some(latest_status)),
         ]);
     }

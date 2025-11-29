@@ -73,6 +73,7 @@ pub fn bucket_start(ts: f64, bucket_seconds: i64) -> DateTime<Local> {
 pub struct AverageRates {
     pub discharge_w: Option<f64>,
     pub charge_w: Option<f64>,
+    pub power_consumption_w: Option<f64>,
 }
 
 #[derive(Default)]
@@ -101,6 +102,7 @@ pub fn average_rates<'a>(samples: impl IntoIterator<Item = &'a Sample>) -> Avera
 
     let mut discharge = RateAccumulator::default();
     let mut charge = RateAccumulator::default();
+    let mut power_consumption = RateAccumulator::default();
     let mut iter = samples.into_iter().filter(|s| s.energy_now_wh.is_some());
     let mut previous = match iter.next() {
         Some(sample) => sample,
@@ -117,8 +119,10 @@ pub fn average_rates<'a>(samples: impl IntoIterator<Item = &'a Sample>) -> Avera
             let delta = current.energy_now_wh.unwrap() - previous.energy_now_wh.unwrap();
             if delta > 0.0 && is_charging(previous) && is_charging(current) {
                 charge.record(delta, dt_hours);
+                power_consumption.record(delta, dt_hours);
             } else if delta < 0.0 && is_discharging(previous) && is_discharging(current) {
                 discharge.record(-delta, dt_hours);
+                power_consumption.record(-delta, dt_hours);
             }
         }
         previous = current;
@@ -127,6 +131,7 @@ pub fn average_rates<'a>(samples: impl IntoIterator<Item = &'a Sample>) -> Avera
     AverageRates {
         discharge_w: discharge.average(),
         charge_w: charge.average(),
+        power_consumption_w: power_consumption.average(),
     }
 }
 
@@ -294,6 +299,9 @@ mod tests {
         let rates = average_rates(&samples);
         assert!((rates.charge_w.unwrap() - 12.0).abs() < 0.01);
         assert!((rates.discharge_w.unwrap() - 6.0).abs() < 0.01);
+        // Power consumption is the average of all power draw (charge + discharge)
+        // Total: 2.0Wh charging + 0.5Wh discharging over 0.25h = 10W average
+        assert!((rates.power_consumption_w.unwrap() - 10.0).abs() < 0.01);
     }
 
     #[test]
