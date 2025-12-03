@@ -49,7 +49,8 @@ pub fn default_graph_path(
 pub fn bucket_span_seconds(timeframe: &Timeframe) -> i64 {
     match timeframe.seconds {
         None => 7 * 24 * 3600,
-        Some(window) if window <= 6.0 * 3600.0 => 20 * 60,
+        Some(window) if window <= 2.0 * 3600.0 => 5 * 60,
+        Some(window) if window <= 6.0 * 3600.0 => 10 * 60,
         Some(window) if window <= 24.0 * 3600.0 => 3600,
         Some(window) if window <= 3.0 * 24.0 * 3600.0 => 2 * 3600,
         Some(window) if window <= 7.0 * 24.0 * 3600.0 => 6 * 3600,
@@ -310,8 +311,8 @@ mod tests {
             .unwrap();
         let bucket = bucket_start(sample_dt.timestamp() as f64, span);
 
-        assert_eq!(span, 20 * 60);
-        assert_eq!(bucket.minute() % 20, 0);
+        assert_eq!(span, 10 * 60);
+        assert_eq!(bucket.minute() % 10, 0);
         assert_eq!(bucket.second(), 0);
 
         let one_day = build_timeframe(0, 1, 0, false).unwrap();
@@ -321,5 +322,24 @@ mod tests {
         assert_eq!(bucket_day.hour(), sample_dt.hour());
         assert_eq!(bucket_day.minute(), 0);
         assert_eq!(bucket_day.second(), 0);
+    }
+
+    #[test]
+    fn short_timeframes_use_five_minute_buckets() {
+        use crate::timeframe::build_timeframe;
+        let timeframe = build_timeframe(1, 0, 0, false).unwrap();
+        let span = bucket_span_seconds(&timeframe);
+        let sample_dt = Local::now()
+            .with_minute(12)
+            .unwrap()
+            .with_second(55)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap();
+        let bucket = bucket_start(sample_dt.timestamp() as f64, span);
+
+        assert_eq!(span, 5 * 60);
+        assert_eq!(bucket.minute() % 5, 0);
+        assert_eq!(bucket.second(), 0);
     }
 }
