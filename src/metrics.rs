@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -106,6 +107,9 @@ struct CpuTimes {
     steal: u64,
 }
 
+static PREVIOUS_CPU_TIMES: OnceLock<Mutex<Option<Vec<CpuTimes>>>> = OnceLock::new();
+const CPU_USAGE_FALLBACK_DELAY: Duration = Duration::from_millis(25);
+
 fn read_cpu_times() -> Option<Vec<CpuTimes>> {
     let content = fs::read_to_string("/proc/stat").ok()?;
     let mut times = Vec::new();
@@ -141,24 +145,15 @@ fn read_cpu_times() -> Option<Vec<CpuTimes>> {
     }
 }
 
-fn cpu_usage_samples(ts: f64) -> Vec<MetricSample> {
-    let first = match read_cpu_times() {
-        Some(v) => v,
-        None => return Vec::new(),
-    };
-    thread::sleep(Duration::from_millis(100));
-    let second = match read_cpu_times() {
-        Some(v) => v,
-        None => return Vec::new(),
-    };
-    let mut second_map: BTreeMap<String, CpuTimes> = BTreeMap::new();
+fn calculate_cpu_usage(ts: f64, first: &[CpuTimes], second: &[CpuTimes]) -> Vec<MetricSample> {
+    let mut second_map: HashMap<&str, &CpuTimes> = HashMap::with_capacity(second.len());
     for entry in second {
-        second_map.insert(entry.label.clone(), entry);
+        second_map.insert(entry.label.as_str(), entry);
     }
 
-    let mut samples = Vec::new();
+    let mut samples = Vec::with_capacity(first.len());
     for prev in first {
-        if let Some(next) = second_map.get(&prev.label) {
+        if let Some(next) = second_map.get(prev.label.as_str()) {
             let prev_total = prev.user
                 + prev.nice
                 + prev.system
@@ -194,6 +189,34 @@ fn cpu_usage_samples(ts: f64) -> Vec<MetricSample> {
             ));
         }
     }
+    samples
+}
+
+fn cpu_usage_samples(ts: f64) -> Vec<MetricSample> {
+    let first = match read_cpu_times() {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let cache = PREVIOUS_CPU_TIMES.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+
+    if let Some(previous) = guard.take() {
+        let samples = calculate_cpu_usage(ts, &previous, &first);
+        *guard = Some(first);
+        return samples;
+    }
+
+    // If we do not have a baseline yet, take a short second reading to compute usage.
+    thread::sleep(CPU_USAGE_FALLBACK_DELAY);
+    let second = match read_cpu_times() {
+        Some(v) => v,
+        None => {
+            *guard = Some(first);
+            return Vec::new();
+        }
+    };
+    let samples = calculate_cpu_usage(ts, &first, &second);
+    *guard = Some(second);
     samples
 }
 
@@ -497,7 +520,7 @@ fn power_samples(ts: f64) -> Vec<MetricSample> {
 }
 
 pub fn collect_metrics(ts: f64) -> Vec<MetricSample> {
-    let mut metrics = Vec::new();
+    let mut metrics = Vec::with_capacity(32);
     metrics.extend(cpu_usage_samples(ts));
     metrics.extend(cpu_frequency_samples(ts));
     metrics.extend(memory_samples(ts));

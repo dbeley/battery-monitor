@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::HashSet, str::FromStr};
 
 use anyhow::Result;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, Row, Transaction};
 
 use crate::metrics::{MetricKind, MetricSample};
 use crate::sysfs::BatteryReading;
@@ -47,45 +47,58 @@ CREATE INDEX IF NOT EXISTS idx_metric_samples_ts ON metric_samples (ts);
 CREATE INDEX IF NOT EXISTS idx_metric_samples_kind_ts ON metric_samples (kind, ts);
 "#;
 
-pub fn init_db(db_path: &Path) -> Result<()> {
+pub fn open_db(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(db_path)?;
     conn.execute_batch(SCHEMA)?;
-    Ok(())
+    Ok(conn)
+}
+
+pub fn init_db(db_path: &Path) -> Result<()> {
+    open_db(db_path).map(|_| ())
 }
 
 pub fn insert_sample(db_path: &Path, sample: &Sample) -> Result<()> {
     insert_samples(db_path, std::slice::from_ref(sample))
 }
 
-pub fn insert_samples(db_path: &Path, samples: &[Sample]) -> Result<()> {
-    let mut conn = Connection::open(db_path)?;
-    let tx = conn.transaction()?;
-    {
-        let mut stmt = tx.prepare(
-            r#"
-            INSERT INTO samples (
-                ts, percentage, capacity_pct, health_pct, energy_now_wh,
-                energy_full_wh, energy_full_design_wh, status, source_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )?;
-        for sample in samples {
-            stmt.execute(params![
-                sample.ts,
-                sample.percentage,
-                sample.capacity_pct,
-                sample.health_pct,
-                sample.energy_now_wh,
-                sample.energy_full_wh,
-                sample.energy_full_design_wh,
-                sample.status,
-                sample.source_path,
-            ])?;
-        }
+fn insert_samples_tx(tx: &Transaction<'_>, samples: &[Sample]) -> Result<()> {
+    if samples.is_empty() {
+        return Ok(());
     }
+    let mut stmt = tx.prepare(
+        r#"
+        INSERT INTO samples (
+            ts, percentage, capacity_pct, health_pct, energy_now_wh,
+            energy_full_wh, energy_full_design_wh, status, source_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )?;
+    for sample in samples {
+        stmt.execute(params![
+            sample.ts,
+            sample.percentage,
+            sample.capacity_pct,
+            sample.health_pct,
+            sample.energy_now_wh,
+            sample.energy_full_wh,
+            sample.energy_full_design_wh,
+            sample.status,
+            sample.source_path,
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn insert_samples(db_path: &Path, samples: &[Sample]) -> Result<()> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let mut conn = open_db(db_path)?;
+    let tx = conn.transaction()?;
+    insert_samples_tx(&tx, samples)?;
     tx.commit()?;
     Ok(())
 }
@@ -98,31 +111,52 @@ fn serialize_details(details: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn insert_metric_samples_tx(tx: &Transaction<'_>, samples: &[MetricSample]) -> Result<()> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare(
+        r#"
+        INSERT INTO metric_samples (
+            ts, kind, source, value, unit, details
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )?;
+    for sample in samples {
+        stmt.execute(params![
+            sample.ts,
+            sample.kind.as_str(),
+            sample.source,
+            sample.value,
+            sample.unit,
+            serialize_details(&sample.details),
+        ])?;
+    }
+    Ok(())
+}
+
 pub fn insert_metric_samples(db_path: &Path, samples: &[MetricSample]) -> Result<()> {
     if samples.is_empty() {
         return Ok(());
     }
-    let mut conn = Connection::open(db_path)?;
+    let mut conn = open_db(db_path)?;
     let tx = conn.transaction()?;
-    {
-        let mut stmt = tx.prepare(
-            r#"
-            INSERT INTO metric_samples (
-                ts, kind, source, value, unit, details
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            "#,
-        )?;
-        for sample in samples {
-            stmt.execute(params![
-                sample.ts,
-                sample.kind.as_str(),
-                sample.source,
-                sample.value,
-                sample.unit,
-                serialize_details(&sample.details),
-            ])?;
-        }
+    insert_metric_samples_tx(&tx, samples)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn insert_all(
+    conn: &mut Connection,
+    samples: &[Sample],
+    metric_samples: &[MetricSample],
+) -> Result<()> {
+    if samples.is_empty() && metric_samples.is_empty() {
+        return Ok(());
     }
+    let tx = conn.transaction()?;
+    insert_samples_tx(&tx, samples)?;
+    insert_metric_samples_tx(&tx, metric_samples)?;
     tx.commit()?;
     Ok(())
 }
