@@ -36,10 +36,7 @@ pub fn default_graph_path(
     let tz_name = sanitize_component(&tz_label);
     let timeframe_label = timeframe.replace('-', "_");
     let timestamp = current.format("%Y-%m-%d_%H-%M-%S");
-    let filename = format!(
-        "battery_monitor_{}_{}_{}.png",
-        timeframe_label, timestamp, tz_name
-    );
+    let filename = format!("symmetri_{}_{}_{}.png", timeframe_label, timestamp, tz_name);
     base_dir
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -217,7 +214,7 @@ mod tests {
         let tz_label = now.format("%Z").to_string();
         let tz = sanitize_component(&tz_label);
         let expected = PathBuf::from(format!(
-            "/tmp/battery_monitor_last_3_hours_2025-11-28_01-30-42_{}.png",
+            "/tmp/symmetri_last_3_hours_2025-11-28_01-30-42_{}.png",
             tz
         ));
         assert_eq!(path, expected);

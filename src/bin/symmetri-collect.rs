@@ -3,10 +3,10 @@ use std::ffi::OsString;
 fn main() {
     let mut args: Vec<OsString> = std::env::args_os().collect();
     if args.is_empty() {
-        args.push(OsString::from("battery-monitor-collect"));
+        args.push(OsString::from("symmetri-collect"));
     }
     args.insert(1, OsString::from("collect"));
-    if let Err(err) = battery_monitor::cli::run(args) {
+    if let Err(err) = symmetri::cli::run(args) {
         eprintln!("Error: {err}");
         std::process::exit(1);
     }

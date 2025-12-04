@@ -1,0 +1,10 @@
+[Unit]
+Description=Symmetri metrics collector
+ConditionPathExists=/sys
+After=network.target
+
+[Service]
+Type=oneshot
+Environment=SYMMETRI_DB=/var/lib/symmetri/metrics.db
+ExecStart=/usr/bin/env symmetri-collect
+StateDirectory=symmetri

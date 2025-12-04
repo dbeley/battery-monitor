@@ -6,21 +6,24 @@ use anyhow::Result;
 use log::{info, warn};
 
 use crate::db::{self, Sample};
+use crate::metrics;
 use crate::sysfs::{find_battery_paths, read_battery};
 
 pub fn default_db_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
     home.join(".local")
         .join("share")
-        .join("battery-monitor")
-        .join("battery.db")
+        .join("symmetri")
+        .join("metrics.db")
 }
 
 pub fn resolve_db_path(db_path: Option<&Path>) -> PathBuf {
     if let Some(path) = db_path {
         return path.to_path_buf();
     }
-    if let Ok(env_path) = std::env::var("BATTERY_MONITOR_DB") {
+    if let Ok(env_path) =
+        std::env::var("SYMMETRI_DB").or_else(|_| std::env::var("BATTERY_MONITOR_DB"))
+    {
         if let Some(stripped) = env_path.strip_prefix("~/") {
             if let Some(home) = dirs::home_dir() {
                 return home.join(stripped);
@@ -38,8 +41,7 @@ pub fn collect_once(db_path: Option<&Path>, sysfs_root: Option<&Path>) -> Result
     let root = sysfs_root.unwrap_or_else(|| Path::new("/sys/class/power_supply"));
     let battery_paths = find_battery_paths(root);
     if battery_paths.is_empty() {
-        warn!("No batteries found in sysfs");
-        return Ok(1);
+        warn!("No batteries found in sysfs; collecting other metrics only");
     }
 
     let ts = SystemTime::now()
@@ -53,18 +55,27 @@ pub fn collect_once(db_path: Option<&Path>, sysfs_root: Option<&Path>) -> Result
         samples.push(db::create_sample_from_reading(&reading, Some(ts)));
     }
 
-    db::insert_samples(&resolved_db, &samples)?;
+    if !samples.is_empty() {
+        db::insert_samples(&resolved_db, &samples)?;
+    }
+    let metric_samples = metrics::collect_metrics(ts);
+    db::insert_metric_samples(&resolved_db, &metric_samples)?;
 
-    for sample in samples {
-        info!(
-            "Logged record for {}: percent={:.2} health={:.2}",
-            Path::new(&sample.source_path)
-                .file_name()
-                .map(|p| p.to_string_lossy())
-                .unwrap_or_else(|| sample.source_path.clone().into()),
-            sample.percentage.unwrap_or(0.0),
-            sample.health_pct.unwrap_or(0.0)
-        );
+    if !samples.is_empty() {
+        for sample in samples {
+            info!(
+                "Logged record for {}: percent={:.2} health={:.2}",
+                Path::new(&sample.source_path)
+                    .file_name()
+                    .map(|p| p.to_string_lossy())
+                    .unwrap_or_else(|| sample.source_path.clone().into()),
+                sample.percentage.unwrap_or(0.0),
+                sample.health_pct.unwrap_or(0.0)
+            );
+        }
+    }
+    if !metric_samples.is_empty() {
+        info!("Logged {} system metric records", metric_samples.len());
     }
     Ok(0)
 }
@@ -119,15 +130,22 @@ mod tests {
     #[test]
     fn resolve_db_path_expands_home_prefix() {
         let home = dirs::home_dir().expect("home directory not found");
-        let _guard = EnvGuard::set("BATTERY_MONITOR_DB", "~/custom/battery.db");
+        let _guard = EnvGuard::set("SYMMETRI_DB", "~/custom/battery.db");
         let resolved = resolve_db_path(None);
         assert_eq!(resolved, home.join("custom").join("battery.db"));
     }
 
     #[test]
     fn resolve_db_path_uses_env_verbatim() {
-        let _guard = EnvGuard::set("BATTERY_MONITOR_DB", "/tmp/from_env.db");
+        let _guard = EnvGuard::set("SYMMETRI_DB", "/tmp/from_env.db");
         let resolved = resolve_db_path(None);
         assert_eq!(resolved, PathBuf::from("/tmp/from_env.db"));
+    }
+
+    #[test]
+    fn resolve_db_path_accepts_legacy_env() {
+        let _guard = EnvGuard::set("BATTERY_MONITOR_DB", "/tmp/legacy.db");
+        let resolved = resolve_db_path(None);
+        assert_eq!(resolved, PathBuf::from("/tmp/legacy.db"));
     }
 }

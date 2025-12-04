@@ -1,5 +1,5 @@
 {
-  description = "Battery monitor for Linux/NixOS";
+  description = "System metrics monitor for Linux/NixOS";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -11,8 +11,8 @@
       let
         pkgs = import nixpkgs { inherit system; };
         app = pkgs.rustPlatform.buildRustPackage {
-          pname = "battery-monitor";
-          version = "0.2.0";
+          pname = "symmetri";
+          version = "0.3.0";
           src = ./.;
           cargoLock = {
             lockFile = ./Cargo.lock;

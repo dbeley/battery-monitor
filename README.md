@@ -1,11 +1,15 @@
-# Battery Monitor (Rust)
+# Symmetri
 
-Battery collector + graph/report tools for Linux (tested on NixOS). Collects battery metrics from `/sys/class/power_supply`, stores the records in SQLite, and prints tables/graphs for configurable hour/day/month windows (default: last 6 hours) or all history. The project is now implemented in Rust for faster startup and lower runtime overhead compared to the original Python version.
+Symmetri is a fast Rust collector + report/graph CLI for Linux (tested on NixOS). It tracks batteries plus broader system metrics and stores everything in SQLite for quick summaries over configurable hour/day/month windows (default: last 6 hours) or all history.
 
 ## Features
-- Collect energy/percentage/health for each battery detected in sysfs
-- SQLite storage (bundled driver) with quick aggregate helpers
-- CLI binaries: `battery-monitor`, `battery-monitor-collect`, and `battery-monitor-report`
+- Batteries: energy/percentage/health from `/sys/class/power_supply`
+- CPU/GPU: usage %, current frequencies (best-effort per device)
+- Network: rx/tx byte counters per interface
+- Memory/disk: used/available bytes
+- Thermal + power: thermal zone temperatures, hwmon power draw where exposed
+- SQLite storage (bundled driver) with aggregate helpers and timeframe reports
+- CLI binaries: `symmetri`, `symmetri-collect`, and `symmetri-report`
 - PNG graphs rendered with Plotters; filenames auto-encode timeframe + timestamp + timezone
 - Sample systemd service/timer for periodic sampling
 - Nix flake for installation and a Rust dev shell
@@ -30,37 +34,37 @@ cargo doc --open                 # browse documentation locally
 ```
 
 ## Database location
-- Default: `~/.local/share/battery-monitor/battery.db`
-- Override via `--db PATH` or `BATTERY_MONITOR_DB`.
+- Default: `~/.local/share/symmetri/metrics.db`
+- Override via `--db PATH` or `SYMMETRI_DB` (legacy `BATTERY_MONITOR_DB` also works).
 
 ## systemd
 Sample units are in `systemd/`:
-- `battery-monitor.service`: runs one collection
-- `battery-monitor.timer`: triggers every 5 minutes
+- `symmetri.service`: runs one collection
+- `symmetri.timer`: triggers every 5 minutes
 
 Install (system-wide):
 ```bash
-sudo cp systemd/battery-monitor.* /etc/systemd/system/
+sudo cp systemd/symmetri.* /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now battery-monitor.timer
+sudo systemctl enable --now symmetri.timer
 ```
-By default the service writes to `/var/lib/battery-monitor/battery.db` via `BATTERY_MONITOR_DB`. Adjust as needed.
+By default the service writes to `/var/lib/symmetri/metrics.db` via `SYMMETRI_DB`. Adjust as needed.
 
-For a user service (no root), place the units in `~/.config/systemd/user/` and enable with `systemctl --user enable --now battery-monitor.timer`.
+For a user service (no root), place the units in `~/.config/systemd/user/` and enable with `systemctl --user enable --now symmetri.timer`.
 
 ## CLI usage
 ```bash
 # Collect once
-battery-monitor-collect
+symmetri-collect
 
 # Collect repeatedly (60s interval)
-battery-monitor-collect --interval 60
+symmetri-collect --interval 60
 
 # Report last day and save graph with an auto-generated name in the cwd
-battery-monitor-report --days 1 --graph
+symmetri-report --days 1 --graph
 
 # Report last week and send the graph to a specific path
-battery-monitor-report --days 7 --graph-path ~/battery-week.png
+symmetri-report --days 7 --graph-path ~/battery-week.png
 ```
 
 Use `--graph` to save a graph image with an informative filename in the current directory. Use `--graph-path` for a custom destination; without either flag the command prints only the textual report.
@@ -80,10 +84,11 @@ nix develop -c cargo test         # run unit tests
 ```
 
 ## NixOS integration
-- Add the flake as an input and include `battery-monitor.packages.${system}.default` in `environment.systemPackages`.
-- The systemd unit `ExecStart` can point to `${pkgs.battery-monitor}/bin/battery-monitor-collect` (or rely on `$PATH`).
+- Add the flake as an input and include `symmetri.packages.${system}.default` in `environment.systemPackages`.
+- The systemd unit `ExecStart` can point to `${pkgs.symmetri}/bin/symmetri-collect` (or rely on `$PATH`).
 
 ## Notes
 - Reads battery info from `/sys/class/power_supply/BAT*`
 - If you have multiple batteries, each record is stored with its sysfs path (`source_path`) and reports aggregate the totals per collection
+- Additional metrics are pulled from `/proc` + `/sys` (CPU/GPU load + clocks, network counters, memory/disk usage, thermal zones, hwmon power)
 - SQLite schema and helpers live in `src/db.rs`

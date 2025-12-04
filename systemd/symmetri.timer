@@ -1,11 +1,11 @@
 [Unit]
-Description=Collect battery metrics periodically
+Description=Collect system metrics periodically
 
 [Timer]
 OnBootSec=1min
 OnUnitActiveSec=5min
 AccuracySec=1s
-Unit=battery-monitor.service
+Unit=symmetri.service
 
 [Install]
 WantedBy=timers.target

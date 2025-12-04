@@ -1,29 +1,29 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `battery_monitor/`: core library. `cli.py` (Typer commands), `collector.py` (reads `/sys/class/power_supply`), `db.py` (SQLite schema/helpers), `graph.py` (matplotlib plots), `sysfs.py` (kernel reads).
-- `tests/`: pytest suite (`test_cli.py`, `test_collector.py`, `test_db.py`, `test_sysfs.py`) with fixtures in `conftest.py`.
+- `src/`: Rust sources. `cli.rs` (CLI args/reporting), `collector.rs` (collection entry), `db.rs` (SQLite schema/helpers), `sysfs.rs` (battery reads), `metrics.rs` (CPU/GPU/net/memory/disk/thermal/power collectors), `graph.rs` (plotting), `aggregate.rs` (battery aggregation).
+- `src/bin/`: wrapper binaries `symmetri-collect.rs` and `symmetri-report.rs`.
 - `systemd/`: sample service/timer units for periodic collection.
-- `battery_*.png`: generated report artifacts; safe to delete and excluded from tests.
+- `battery_*.png` / `symmetri_*.png`: generated report artifacts; safe to delete and excluded from tests.
 
 ## Build, Test, and Development Commands
-- `nix develop`: enter the dev shell (fish) with Python, pytest, ruff, typos, pre-commit.
-- `nix run . -- collect --help`: show CLI help; swap `--help` for `collect` or `report` to run.
-- `python -m pytest` (inside dev shell) or `nix develop -c pytest`: run tests.
-- `nix develop -c pre-commit run --all-files`: lint (ruff) + spell-check (typos) before commits.
-- `battery-monitor-report --days 1 --graph`: smoke test reporting when a DB exists.
+- `nix develop`: enter the dev shell (fish) with Rust toolchain, pkg-config, fontconfig, pre-commit.
+- `nix run . -- collect --help`: show CLI help; swap `collect` or `report` to run.
+- `cargo test` or `nix develop -c cargo test`: run tests.
+- `nix develop -c pre-commit run --all-files`: lint/spell-check before commits.
+- `symmetri-report --days 1 --graph`: smoke test reporting when a DB exists.
 
 ## Coding Style & Naming Conventions
-- Python 3.10+, 4-space indentation, type hints preferred; keep modules single-purpose.
-- Patterns: CLI in `cli.py`, IO in `collector.py`/`sysfs.py`, DB access in `db.py`, rendering in `graph.py`.
-- Naming: snake_case for code, lowercase-dash for CLI flags, safe filenames via `_default_graph_path`.
-- Run `ruff check .` and `typos` (pre-commit) to keep formatting and spelling consistent.
+- Rust 2021 edition; 4-space indentation; prefer clear naming and small modules.
+- Patterns: CLI in `cli.rs`, IO in `collector.rs`/`sysfs.rs`/`metrics.rs`, DB access in `db.rs`, rendering in `graph.rs`.
+- Naming: snake_case for code, lowercase-dash for CLI flags, safe filenames via `default_graph_path`.
+- Run `cargo fmt`, `cargo clippy`, and `typos` (pre-commit) to keep formatting and spelling consistent.
 
 ## Testing Guidelines
-- Tests live in `tests/test_*.py`; mirror new modules with matching tests.
-- Use fixtures in `tests/conftest.py` for temp DBs; mock `sysfs` helpers instead of real `/sys`.
-- Add regression tests for new timeframes, schema changes, or CLI flags; cover edge cases (no samples, multiple batteries).
-- Capture expected CLI snippets with `runner.invoke` where it guards behavior.
+- Tests live alongside code in `src/*.rs` (unit tests).
+- Prefer mocking sysfs/proc data in tests; avoid relying on host hardware.
+- Add regression tests for new metrics, schema changes, timeframe logic, or CLI flags; cover edge cases (no samples, multiple batteries).
+- Capture expected CLI snippets with integration-style tests using `assert_cmd` when behavior is guarded.
 
 ## Commit & Pull Request Guidelines
 - Use short, imperative subjects (e.g., “Simplify image output CLI”); add body for rationale when helpful.
@@ -31,6 +31,6 @@
 - PRs: describe scope, manual test notes (commands run, outputs/paths), linked issues, and graph screenshots when behavior changes.
 
 ## Configuration & Deployment Notes
-- Default DB: `~/.local/share/battery-monitor/battery.db`; override with `--db` or `BATTERY_MONITOR_DB`.
+- Default DB: `~/.local/share/symmetri/metrics.db`; override with `--db`, `SYMMETRI_DB` (legacy `BATTERY_MONITOR_DB` supported).
 - Sample systemd units run collection every 5 minutes; adjust paths/env vars before installing to `/etc/systemd/system/` or `~/.config/systemd/user/`.
 - Graphs default to the current directory; use `--graph-path` when scripting to avoid clutter.

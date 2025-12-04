@@ -4,6 +4,7 @@ pub mod cli_helpers;
 pub mod collector;
 pub mod db;
 pub mod graph;
+pub mod metrics;
 pub mod sysfs;
 pub mod timeframe;
 
