@@ -47,21 +47,23 @@ CREATE INDEX IF NOT EXISTS idx_metric_samples_ts ON metric_samples (ts);
 CREATE INDEX IF NOT EXISTS idx_metric_samples_kind_ts ON metric_samples (kind, ts);
 "#;
 
-pub fn init_db(db_path: &Path) -> Result<()> {
+pub fn init_db_connection(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(db_path)?;
     conn.execute_batch(SCHEMA)?;
-    Ok(())
+    Ok(conn)
 }
 
-pub fn insert_sample(db_path: &Path, sample: &Sample) -> Result<()> {
-    insert_samples(db_path, std::slice::from_ref(sample))
+pub fn init_db(db_path: &Path) -> Result<()> {
+    init_db_connection(db_path).map(|_| ())
 }
 
-pub fn insert_samples(db_path: &Path, samples: &[Sample]) -> Result<()> {
-    let mut conn = Connection::open(db_path)?;
+pub fn insert_samples_with_conn(conn: &mut Connection, samples: &[Sample]) -> Result<()> {
+    if samples.is_empty() {
+        return Ok(());
+    }
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare(
@@ -90,6 +92,15 @@ pub fn insert_samples(db_path: &Path, samples: &[Sample]) -> Result<()> {
     Ok(())
 }
 
+pub fn insert_sample(db_path: &Path, sample: &Sample) -> Result<()> {
+    insert_samples(db_path, std::slice::from_ref(sample))
+}
+
+pub fn insert_samples(db_path: &Path, samples: &[Sample]) -> Result<()> {
+    let mut conn = Connection::open(db_path)?;
+    insert_samples_with_conn(&mut conn, samples)
+}
+
 fn serialize_details(details: &serde_json::Value) -> Option<String> {
     if details.is_null() {
         None
@@ -98,11 +109,13 @@ fn serialize_details(details: &serde_json::Value) -> Option<String> {
     }
 }
 
-pub fn insert_metric_samples(db_path: &Path, samples: &[MetricSample]) -> Result<()> {
+pub fn insert_metric_samples_with_conn(
+    conn: &mut Connection,
+    samples: &[MetricSample],
+) -> Result<()> {
     if samples.is_empty() {
         return Ok(());
     }
-    let mut conn = Connection::open(db_path)?;
     let tx = conn.transaction()?;
     {
         let mut stmt = tx.prepare(
@@ -123,6 +136,69 @@ pub fn insert_metric_samples(db_path: &Path, samples: &[MetricSample]) -> Result
             ])?;
         }
     }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn insert_metric_samples(db_path: &Path, samples: &[MetricSample]) -> Result<()> {
+    let mut conn = Connection::open(db_path)?;
+    insert_metric_samples_with_conn(&mut conn, samples)
+}
+
+pub fn insert_all_samples(
+    conn: &mut Connection,
+    battery_samples: &[Sample],
+    metric_samples: &[MetricSample],
+) -> Result<()> {
+    if battery_samples.is_empty() && metric_samples.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+
+    if !battery_samples.is_empty() {
+        let mut stmt = tx.prepare(
+            r#"
+            INSERT INTO samples (
+                ts, percentage, capacity_pct, health_pct, energy_now_wh,
+                energy_full_wh, energy_full_design_wh, status, source_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )?;
+        for sample in battery_samples {
+            stmt.execute(params![
+                sample.ts,
+                sample.percentage,
+                sample.capacity_pct,
+                sample.health_pct,
+                sample.energy_now_wh,
+                sample.energy_full_wh,
+                sample.energy_full_design_wh,
+                sample.status,
+                sample.source_path,
+            ])?;
+        }
+    }
+
+    if !metric_samples.is_empty() {
+        let mut stmt = tx.prepare(
+            r#"
+            INSERT INTO metric_samples (
+                ts, kind, source, value, unit, details
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )?;
+        for sample in metric_samples {
+            stmt.execute(params![
+                sample.ts,
+                sample.kind.as_str(),
+                sample.source,
+                sample.value,
+                sample.unit,
+                serialize_details(&sample.details),
+            ])?;
+        }
+    }
+
     tx.commit()?;
     Ok(())
 }
@@ -448,6 +524,38 @@ mod tests {
             .map(|r| r.path.to_string_lossy().to_string())
             .collect();
         assert_eq!(paths, expected);
+    }
+
+    #[test]
+    fn insert_all_samples_combines_battery_and_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("combo.db");
+        let mut conn = init_db_connection(&db_path).unwrap();
+
+        let battery = Sample {
+            ts: 10.0,
+            percentage: Some(50.0),
+            capacity_pct: Some(90.0),
+            health_pct: Some(95.0),
+            energy_now_wh: Some(40.0),
+            energy_full_wh: Some(80.0),
+            energy_full_design_wh: Some(90.0),
+            status: Some("Discharging".to_string()),
+            source_path: "BAT0".to_string(),
+        };
+        let metric = MetricSample {
+            ts: 10.0,
+            kind: MetricKind::CpuUsage,
+            source: "cpu".to_string(),
+            value: Some(42.0),
+            unit: Some("%".to_string()),
+            details: json!({"note": "batched"}),
+        };
+
+        insert_all_samples(&mut conn, &[battery], &[metric]).unwrap();
+
+        assert_eq!(fetch_samples(&db_path, None).unwrap().len(), 1);
+        assert_eq!(fetch_metric_samples(&db_path, None, None).unwrap().len(), 1);
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub fn resolve_db_path(db_path: Option<&Path>) -> PathBuf {
 
 pub fn collect_once(db_path: Option<&Path>, sysfs_root: Option<&Path>) -> Result<i32> {
     let resolved_db = resolve_db_path(db_path);
-    db::init_db(&resolved_db)?;
+    let mut conn = db::init_db_connection(&resolved_db)?;
 
     let root = sysfs_root.unwrap_or_else(|| Path::new("/sys/class/power_supply"));
     let battery_paths = find_battery_paths(root);
@@ -55,11 +55,8 @@ pub fn collect_once(db_path: Option<&Path>, sysfs_root: Option<&Path>) -> Result
         samples.push(db::create_sample_from_reading(&reading, Some(ts)));
     }
 
-    if !samples.is_empty() {
-        db::insert_samples(&resolved_db, &samples)?;
-    }
     let metric_samples = metrics::collect_metrics(ts);
-    db::insert_metric_samples(&resolved_db, &metric_samples)?;
+    db::insert_all_samples(&mut conn, &samples, &metric_samples)?;
 
     if !samples.is_empty() {
         for sample in samples {

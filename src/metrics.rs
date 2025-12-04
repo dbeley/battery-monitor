@@ -497,8 +497,9 @@ fn power_samples(ts: f64) -> Vec<MetricSample> {
 }
 
 pub fn collect_metrics(ts: f64) -> Vec<MetricSample> {
+    let cpu_usage_handle = thread::spawn(move || cpu_usage_samples(ts));
+
     let mut metrics = Vec::new();
-    metrics.extend(cpu_usage_samples(ts));
     metrics.extend(cpu_frequency_samples(ts));
     metrics.extend(memory_samples(ts));
     metrics.extend(network_samples(ts));
@@ -506,5 +507,8 @@ pub fn collect_metrics(ts: f64) -> Vec<MetricSample> {
     metrics.extend(temperature_samples(ts));
     metrics.extend(gpu_samples(ts));
     metrics.extend(power_samples(ts));
+    if let Ok(cpu_samples) = cpu_usage_handle.join() {
+        metrics.extend(cpu_samples);
+    }
     metrics
 }
