@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
 use comfy_table::presets::UTF8_FULL_CONDENSED;
 use comfy_table::{Attribute, Cell, CellAlignment, Color, ContentArrangement, Table};
@@ -13,7 +14,7 @@ use chrono::{DateTime, Local};
 use crate::aggregate::aggregate_samples_by_timestamp;
 use crate::cli_helpers::{
     average_rates, bucket_span_seconds, bucket_start, default_graph_path, estimate_runtime_hours,
-    format_runtime,
+    format_runtime, AverageRates,
 };
 use crate::collector::{collect_loop, collect_once, resolve_db_path};
 use crate::db::{self, Sample};
@@ -29,6 +30,17 @@ use crate::timeframe::{build_timeframe, Timeframe};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum ReportPreset {
+    Battery,
+    Cpu,
+    Gpu,
+    Memory,
+    Network,
+    Temperature,
+    Disk,
 }
 
 #[derive(Subcommand)]
@@ -68,6 +80,14 @@ pub enum Commands {
         /// Custom path for the graph image (png/pdf/etc); overrides --graph name
         #[arg(long = "graph-path")]
         graph_path: Option<PathBuf>,
+        /// Which report presets to render (repeatable)
+        #[arg(
+            long = "preset",
+            value_enum,
+            num_args = 0..,
+            default_values_t = [ReportPreset::Battery]
+        )]
+        presets: Vec<ReportPreset>,
         /// Enable debug logging
         #[arg(short, long)]
         verbose: bool,
@@ -83,6 +103,57 @@ fn configure_logging(verbose: bool) {
         builder.filter_level(log::LevelFilter::Info);
     }
     let _ = builder.try_init();
+}
+
+fn normalize_presets(mut presets: Vec<ReportPreset>) -> Vec<ReportPreset> {
+    if presets.is_empty() {
+        return vec![ReportPreset::Battery];
+    }
+    presets.sort();
+    presets.dedup();
+    presets
+}
+
+fn metric_kinds_for_presets(presets: &[ReportPreset]) -> Vec<MetricKind> {
+    let mut kinds = Vec::new();
+    for preset in presets {
+        match preset {
+            ReportPreset::Battery => kinds.push(MetricKind::PowerDraw),
+            ReportPreset::Cpu => {
+                kinds.push(MetricKind::CpuUsage);
+                kinds.push(MetricKind::CpuFrequency);
+            }
+            ReportPreset::Gpu => {
+                kinds.push(MetricKind::GpuUsage);
+                kinds.push(MetricKind::GpuFrequency);
+            }
+            ReportPreset::Memory => kinds.push(MetricKind::MemoryUsage),
+            ReportPreset::Network => kinds.push(MetricKind::NetworkBytes),
+            ReportPreset::Temperature => kinds.push(MetricKind::Temperature),
+            ReportPreset::Disk => kinds.push(MetricKind::DiskUsage),
+        }
+    }
+    kinds.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    kinds.dedup();
+    kinds
+}
+
+fn has_data_for_preset(preset: ReportPreset, samples: &[Sample], metrics: &[MetricSample]) -> bool {
+    match preset {
+        ReportPreset::Battery => {
+            !samples.is_empty() || metrics.iter().any(|m| m.kind == MetricKind::PowerDraw)
+        }
+        ReportPreset::Cpu => metrics
+            .iter()
+            .any(|m| matches!(m.kind, MetricKind::CpuUsage | MetricKind::CpuFrequency)),
+        ReportPreset::Gpu => metrics
+            .iter()
+            .any(|m| matches!(m.kind, MetricKind::GpuUsage | MetricKind::GpuFrequency)),
+        ReportPreset::Memory => metrics.iter().any(|m| m.kind == MetricKind::MemoryUsage),
+        ReportPreset::Network => metrics.iter().any(|m| m.kind == MetricKind::NetworkBytes),
+        ReportPreset::Temperature => metrics.iter().any(|m| m.kind == MetricKind::Temperature),
+        ReportPreset::Disk => metrics.iter().any(|m| m.kind == MetricKind::DiskUsage),
+    }
 }
 
 pub fn run<I, T>(args: I) -> Result<()>
@@ -115,11 +186,14 @@ where
             db_path,
             graph: graph_flag,
             graph_path,
+            presets,
             verbose,
         } => {
             configure_logging(verbose);
             let timeframe = build_timeframe(hours as i64, days as i64, months as i64, all_time)?;
             let resolved = resolve_db_path(db_path.as_deref());
+            let presets = normalize_presets(presets);
+            let metric_kinds = metric_kinds_for_presets(&presets);
 
             let battery_total = db::count_samples(&resolved, None)?;
             let metric_total = db::count_metric_samples(&resolved, None)?;
@@ -129,13 +203,22 @@ where
             }
 
             let since_ts = timeframe.since_timestamp(None);
-            let raw_samples = db::fetch_samples(&resolved, since_ts)?;
-            let metric_samples = db::fetch_metric_samples(&resolved, since_ts, None)?;
+            let raw_samples =
+                if presets.contains(&ReportPreset::Battery) || graph_flag || graph_path.is_some() {
+                    db::fetch_samples(&resolved, since_ts)?
+                } else {
+                    Vec::new()
+                };
+            let metric_samples =
+                db::fetch_metric_samples(&resolved, since_ts, Some(&metric_kinds))?;
             let timeframe_record_count = raw_samples.len();
             let samples = aggregate_samples_by_timestamp(&raw_samples);
-            if samples.is_empty() && metric_samples.is_empty() {
+            let has_selected_data = presets
+                .iter()
+                .any(|preset| has_data_for_preset(*preset, &samples, &metric_samples));
+            if !has_selected_data {
                 println!(
-                    "No records for {}; try a broader timeframe.",
+                    "No records for the selected presets in {}; try a broader timeframe or enable those collectors.",
                     timeframe.label.replace('_', " ")
                 );
                 std::process::exit(1);
@@ -164,6 +247,7 @@ where
                 &timeframe,
                 timeframe_record_count,
                 &metric_samples,
+                &presets,
             );
         }
     }
@@ -175,40 +259,137 @@ fn summarize(
     timeframe: &Timeframe,
     timeframe_records: usize,
     metrics: &[MetricSample],
+    presets: &[ReportPreset],
 ) {
     let timeframe_label = timeframe.label.replace('_', " ");
+    let bucket_seconds = bucket_span_seconds(timeframe);
+    let battery_rates = average_rates(timeframe_samples);
+    let power_draw_stats = average_for_kind(metrics, MetricKind::PowerDraw);
+    let avg_discharge_w = power_draw_stats.average().or(battery_rates.discharge_w);
+    let est_runtime_hours = timeframe_samples
+        .last()
+        .and_then(|sample| estimate_runtime_hours(avg_discharge_w, sample));
+    let power_draw_by_bucket =
+        bucket_stats_for_kind(metrics, MetricKind::PowerDraw, bucket_seconds);
+    let network_rates = compute_network_rates(metrics);
 
-    if !timeframe_samples.is_empty() {
-        let rates = average_rates(timeframe_samples);
-        let latest_sample = timeframe_samples
-            .last()
-            .expect("timeframe_samples should never be empty");
-        let est_runtime_hours = estimate_runtime_hours(rates.discharge_w, latest_sample);
+    println!(
+        "\nOverview ({})\n{}",
+        timeframe_label,
+        overview_table(
+            presets,
+            timeframe_records,
+            timeframe_samples,
+            &battery_rates,
+            avg_discharge_w,
+            est_runtime_hours,
+            metrics,
+            &network_rates
+        )
+    );
 
+    if presets.contains(&ReportPreset::Battery) {
         println!(
-            "\nTimeframe summary ({})\n{}",
+            "\nBattery summary ({})\n{}",
             timeframe_label,
-            timeframe_summary_table(
+            battery_summary_table(
                 timeframe_records,
-                rates.discharge_w,
-                rates.charge_w,
+                avg_discharge_w,
+                battery_rates.charge_w,
                 est_runtime_hours
             )
         );
-        println!(
-            "\nTimeframe windows ({})\n{}",
-            timeframe.label.replace('_', " "),
-            timeframe_report_table(timeframe, timeframe_samples)
-        );
-    } else {
-        println!("\nNo battery samples available for {timeframe_label}.");
+
+        if timeframe_samples.is_empty() {
+            println!("\nNo battery samples available for buckets in {timeframe_label}.");
+        } else {
+            println!(
+                "\nBattery windows ({})\n{}",
+                timeframe.label.replace('_', " "),
+                battery_windows_table(timeframe_samples, &power_draw_by_bucket, bucket_seconds)
+            );
+        }
     }
 
-    println!(
-        "\nSystem metrics (latest in {})\n{}",
-        timeframe_label,
-        metrics_summary_table(metrics)
-    );
+    if presets.contains(&ReportPreset::Cpu) {
+        let usage_buckets = bucket_stats_for_kind(metrics, MetricKind::CpuUsage, bucket_seconds);
+        let freq_buckets = bucket_stats_for_kind(metrics, MetricKind::CpuFrequency, bucket_seconds);
+        if usage_buckets.is_empty() && freq_buckets.is_empty() {
+            println!("\nNo CPU samples available for {timeframe_label}.");
+        } else {
+            println!(
+                "\nCPU windows ({})\n{}",
+                timeframe.label.replace('_', " "),
+                cpu_window_table(bucket_seconds, &usage_buckets, &freq_buckets)
+            );
+        }
+    }
+
+    if presets.contains(&ReportPreset::Gpu) {
+        let usage_buckets = bucket_stats_for_kind(metrics, MetricKind::GpuUsage, bucket_seconds);
+        let freq_buckets = bucket_stats_for_kind(metrics, MetricKind::GpuFrequency, bucket_seconds);
+        if usage_buckets.is_empty() && freq_buckets.is_empty() {
+            println!("\nNo GPU samples available for {timeframe_label}.");
+        } else {
+            println!(
+                "\nGPU windows ({})\n{}",
+                timeframe.label.replace('_', " "),
+                gpu_window_table(bucket_seconds, &usage_buckets, &freq_buckets)
+            );
+        }
+    }
+
+    if presets.contains(&ReportPreset::Memory) {
+        let memory_buckets = bucket_usage_stats(metrics, MetricKind::MemoryUsage, bucket_seconds);
+        if memory_buckets.is_empty() {
+            println!("\nNo memory samples available for {timeframe_label}.");
+        } else {
+            println!(
+                "\nMemory windows ({})\n{}",
+                timeframe.label.replace('_', " "),
+                memory_window_table(bucket_seconds, &memory_buckets)
+            );
+        }
+    }
+
+    if presets.contains(&ReportPreset::Disk) {
+        let disk_buckets = bucket_usage_stats(metrics, MetricKind::DiskUsage, bucket_seconds);
+        if disk_buckets.is_empty() {
+            println!("\nNo disk samples available for {timeframe_label}.");
+        } else {
+            println!(
+                "\nDisk windows ({})\n{}",
+                timeframe.label.replace('_', " "),
+                disk_window_table(bucket_seconds, &disk_buckets)
+            );
+        }
+    }
+
+    if presets.contains(&ReportPreset::Network) {
+        let network_buckets = bucket_network_rates(&network_rates, bucket_seconds);
+        if network_buckets.is_empty() {
+            println!("\nNo network samples available for {timeframe_label}.");
+        } else {
+            println!(
+                "\nNetwork windows ({})\n{}",
+                timeframe.label.replace('_', " "),
+                network_window_table(bucket_seconds, &network_buckets)
+            );
+        }
+    }
+
+    if presets.contains(&ReportPreset::Temperature) {
+        let temp_buckets = bucket_stats_for_kind(metrics, MetricKind::Temperature, bucket_seconds);
+        if temp_buckets.is_empty() {
+            println!("\nNo temperature samples available for {timeframe_label}.");
+        } else {
+            println!(
+                "\nTemperature windows ({})\n{}",
+                timeframe.label.replace('_', " "),
+                temperature_window_table(bucket_seconds, &temp_buckets)
+            );
+        }
+    }
 }
 
 fn format_power(value: Option<f64>) -> String {
@@ -257,7 +438,345 @@ fn status_cell(status: Option<&str>) -> Cell {
     Cell::new(status_text).fg(color)
 }
 
-fn timeframe_summary_table(
+fn format_percent(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.1}%"))
+        .unwrap_or_else(|| "--".to_string())
+}
+
+fn format_rate(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{}/s", format_bytes(v)))
+        .unwrap_or_else(|| "--".to_string())
+}
+
+#[derive(Default, Clone)]
+struct NumberStats {
+    total: f64,
+    count: usize,
+    min: f64,
+    max: f64,
+}
+
+impl NumberStats {
+    fn record(&mut self, value: f64) {
+        if self.count == 0 {
+            self.min = value;
+            self.max = value;
+        } else {
+            self.min = self.min.min(value);
+            self.max = self.max.max(value);
+        }
+        self.total += value;
+        self.count += 1;
+    }
+
+    fn record_opt(&mut self, value: Option<f64>) {
+        if let Some(v) = value {
+            self.record(v);
+        }
+    }
+
+    fn average(&self) -> Option<f64> {
+        (self.count > 0).then_some(self.total / self.count as f64)
+    }
+
+    fn max(&self) -> Option<f64> {
+        (self.count > 0).then_some(self.max)
+    }
+}
+
+#[derive(Default, Clone)]
+struct UsageStats {
+    used: NumberStats,
+    percent: NumberStats,
+}
+
+impl UsageStats {
+    fn record(&mut self, used: Option<f64>, total: Option<f64>) {
+        if let Some(used_bytes) = used {
+            self.used.record(used_bytes);
+            if let Some(total_bytes) = total {
+                if total_bytes > 0.0 {
+                    self.percent.record((used_bytes / total_bytes) * 100.0);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct RateStats {
+    rx: NumberStats,
+    tx: NumberStats,
+}
+
+impl RateStats {
+    fn record(&mut self, rx: Option<f64>, tx: Option<f64>) {
+        self.rx.record_opt(rx);
+        self.tx.record_opt(tx);
+    }
+}
+
+fn average_for_kind(metrics: &[MetricSample], kind: MetricKind) -> NumberStats {
+    let mut stats = NumberStats::default();
+    for sample in metrics.iter().filter(|s| s.kind == kind) {
+        stats.record_opt(sample.value);
+    }
+    stats
+}
+
+fn bucket_stats_for_kind(
+    metrics: &[MetricSample],
+    kind: MetricKind,
+    bucket_seconds: i64,
+) -> BTreeMap<DateTime<Local>, NumberStats> {
+    let mut buckets: BTreeMap<DateTime<Local>, NumberStats> = BTreeMap::new();
+    for sample in metrics.iter().filter(|s| s.kind == kind) {
+        if let Some(value) = sample.value {
+            let bucket = bucket_start(sample.ts, bucket_seconds);
+            buckets.entry(bucket).or_default().record(value);
+        }
+    }
+    buckets
+}
+
+fn usage_stats_for_kind(metrics: &[MetricSample], kind: MetricKind) -> UsageStats {
+    let mut stats = UsageStats::default();
+    for sample in metrics.iter().filter(|s| s.kind == kind) {
+        let total = number_from_details(sample, "total_bytes");
+        stats.record(sample.value, total);
+    }
+    stats
+}
+
+fn bucket_usage_stats(
+    metrics: &[MetricSample],
+    kind: MetricKind,
+    bucket_seconds: i64,
+) -> BTreeMap<DateTime<Local>, UsageStats> {
+    let mut buckets: BTreeMap<DateTime<Local>, UsageStats> = BTreeMap::new();
+    for sample in metrics.iter().filter(|s| s.kind == kind) {
+        let bucket = bucket_start(sample.ts, bucket_seconds);
+        let total = number_from_details(sample, "total_bytes");
+        buckets
+            .entry(bucket)
+            .or_default()
+            .record(sample.value, total);
+    }
+    buckets
+}
+
+struct NetworkRateSample {
+    ts: f64,
+    rx_rate: Option<f64>,
+    tx_rate: Option<f64>,
+}
+
+fn rate_from_counters(previous: Option<f64>, current: Option<f64>, dt: f64) -> Option<f64> {
+    match (previous, current) {
+        (Some(prev), Some(next)) if next >= prev && dt > 0.0 => Some((next - prev) / dt),
+        _ => None,
+    }
+}
+
+fn compute_network_rates(metrics: &[MetricSample]) -> Vec<NetworkRateSample> {
+    let mut by_iface: BTreeMap<&str, Vec<&MetricSample>> = BTreeMap::new();
+    for sample in metrics
+        .iter()
+        .filter(|s| s.kind == MetricKind::NetworkBytes)
+    {
+        by_iface.entry(&sample.source).or_default().push(sample);
+    }
+
+    let mut rates = Vec::new();
+    for (_iface, mut samples) in by_iface {
+        samples.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap());
+        for window in samples.windows(2) {
+            let prev = window[0];
+            let next = window[1];
+            let dt = next.ts - prev.ts;
+            if dt <= 0.0 {
+                continue;
+            }
+            let rx_rate = rate_from_counters(
+                number_from_details(prev, "rx_bytes"),
+                number_from_details(next, "rx_bytes"),
+                dt,
+            );
+            let tx_rate = rate_from_counters(
+                number_from_details(prev, "tx_bytes"),
+                number_from_details(next, "tx_bytes"),
+                dt,
+            );
+            if rx_rate.is_none() && tx_rate.is_none() {
+                continue;
+            }
+            rates.push(NetworkRateSample {
+                ts: next.ts,
+                rx_rate,
+                tx_rate,
+            });
+        }
+    }
+    rates
+}
+
+fn bucket_network_rates(
+    rates: &[NetworkRateSample],
+    bucket_seconds: i64,
+) -> BTreeMap<DateTime<Local>, RateStats> {
+    let mut buckets: BTreeMap<DateTime<Local>, RateStats> = BTreeMap::new();
+    for rate in rates {
+        let bucket = bucket_start(rate.ts, bucket_seconds);
+        buckets
+            .entry(bucket)
+            .or_default()
+            .record(rate.rx_rate, rate.tx_rate);
+    }
+    buckets
+}
+
+fn preset_label(preset: ReportPreset) -> &'static str {
+    match preset {
+        ReportPreset::Battery => "Battery",
+        ReportPreset::Cpu => "CPU",
+        ReportPreset::Gpu => "GPU",
+        ReportPreset::Memory => "Memory",
+        ReportPreset::Network => "Network",
+        ReportPreset::Temperature => "Temperature",
+        ReportPreset::Disk => "Disk",
+    }
+}
+
+fn format_freq(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.0}MHz"))
+        .unwrap_or_else(|| "--".to_string())
+}
+
+fn overview_table(
+    presets: &[ReportPreset],
+    timeframe_records: usize,
+    battery_samples: &[Sample],
+    battery_rates: &AverageRates,
+    avg_discharge_w: Option<f64>,
+    est_runtime_hours: Option<f64>,
+    metrics: &[MetricSample],
+    network_rates: &[NetworkRateSample],
+) -> Table {
+    let mut table = themed_table();
+    table.set_header(header_cells(&["Preset", "Summary"]));
+
+    for preset in presets {
+        let summary = match preset {
+            ReportPreset::Battery => {
+                let charge = format_power(battery_rates.charge_w);
+                let discharge = format_power(avg_discharge_w);
+                let runtime = format_runtime(est_runtime_hours);
+                if battery_samples.is_empty() && avg_discharge_w.is_none() {
+                    format!("Records {timeframe_records} | no battery data")
+                } else {
+                    format!(
+                        "Records {timeframe_records} | avg draw {discharge} | avg charge {charge} | est runtime {runtime}"
+                    )
+                }
+            }
+            ReportPreset::Cpu => {
+                let usage = average_for_kind(metrics, MetricKind::CpuUsage);
+                let freq = average_for_kind(metrics, MetricKind::CpuFrequency);
+                if usage.count == 0 && freq.count == 0 {
+                    "No CPU data".to_string()
+                } else {
+                    format!(
+                        "Avg usage {} (peak {}) | Avg freq {}",
+                        format_percent(usage.average()),
+                        format_percent(usage.max()),
+                        format_freq(freq.average()),
+                    )
+                }
+            }
+            ReportPreset::Gpu => {
+                let usage = average_for_kind(metrics, MetricKind::GpuUsage);
+                let freq = average_for_kind(metrics, MetricKind::GpuFrequency);
+                if usage.count == 0 && freq.count == 0 {
+                    "No GPU data".to_string()
+                } else {
+                    format!(
+                        "Avg usage {} (peak {}) | Avg freq {}",
+                        format_percent(usage.average()),
+                        format_percent(usage.max()),
+                        format_freq(freq.average())
+                    )
+                }
+            }
+            ReportPreset::Memory => {
+                let usage = usage_stats_for_kind(metrics, MetricKind::MemoryUsage);
+                if usage.used.count == 0 {
+                    "No memory data".to_string()
+                } else {
+                    format!(
+                        "Avg used {} ({})",
+                        format_opt_bytes(usage.used.average()),
+                        format_percent(usage.percent.average())
+                    )
+                }
+            }
+            ReportPreset::Disk => {
+                let usage = usage_stats_for_kind(metrics, MetricKind::DiskUsage);
+                if usage.used.count == 0 {
+                    "No disk data".to_string()
+                } else {
+                    format!(
+                        "Avg used {} ({})",
+                        format_opt_bytes(usage.used.average()),
+                        format_percent(usage.percent.average())
+                    )
+                }
+            }
+            ReportPreset::Network => {
+                let mut combined = RateStats::default();
+                for rate in network_rates {
+                    combined.record(rate.rx_rate, rate.tx_rate);
+                }
+                if combined.rx.count == 0 && combined.tx.count == 0 {
+                    "No network data".to_string()
+                } else {
+                    format!(
+                        "Avg down {} (peak {}) | Avg up {} (peak {})",
+                        format_rate(combined.rx.average()),
+                        format_rate(combined.rx.max()),
+                        format_rate(combined.tx.average()),
+                        format_rate(combined.tx.max())
+                    )
+                }
+            }
+            ReportPreset::Temperature => {
+                let temps = average_for_kind(metrics, MetricKind::Temperature);
+                if temps.count == 0 {
+                    "No temperature data".to_string()
+                } else {
+                    format!(
+                        "Avg {} (peak {})",
+                        temps
+                            .average()
+                            .map(|v| format!("{v:.1}C"))
+                            .unwrap_or_else(|| "--".to_string()),
+                        temps
+                            .max()
+                            .map(|v| format!("{v:.1}C"))
+                            .unwrap_or_else(|| "--".to_string())
+                    )
+                }
+            }
+        };
+        table.add_row(vec![label_cell(preset_label(*preset)), Cell::new(summary)]);
+    }
+
+    table
+}
+
+fn battery_summary_table(
     timeframe_records: usize,
     avg_discharge_w: Option<f64>,
     avg_charge_w: Option<f64>,
@@ -284,10 +803,12 @@ fn timeframe_summary_table(
     table
 }
 
-fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
-    let bucket_seconds = bucket_span_seconds(timeframe);
-    let mut buckets: std::collections::BTreeMap<DateTime<Local>, Vec<&Sample>> =
-        std::collections::BTreeMap::new();
+fn battery_windows_table(
+    samples: &[Sample],
+    power_draw: &BTreeMap<DateTime<Local>, NumberStats>,
+    bucket_seconds: i64,
+) -> Table {
+    let mut buckets: BTreeMap<DateTime<Local>, Vec<&Sample>> = BTreeMap::new();
     for sample in samples {
         let bucket_key = bucket_start(sample.ts, bucket_seconds);
         buckets.entry(bucket_key).or_default().push(sample);
@@ -313,6 +834,10 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
             .and_then(|s| s.status.as_deref())
             .unwrap_or("unknown");
         let rates = average_rates(bucket_samples.iter().copied());
+        let draw = power_draw
+            .get(&bucket_start)
+            .and_then(NumberStats::average)
+            .or(rates.discharge_w);
         report.add_row(vec![
             Cell::new(format_bucket(bucket_start, bucket_seconds))
                 .fg(Color::Magenta)
@@ -321,7 +846,7 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
             value_cell(min_pct),
             value_cell(avg_pct),
             value_cell(max_pct),
-            value_cell(format_power(rates.discharge_w)),
+            value_cell(format_power(draw)),
             value_cell(format_power(rates.charge_w)),
             status_cell(Some(latest_status)),
         ]);
@@ -329,67 +854,197 @@ fn timeframe_report_table(timeframe: &Timeframe, samples: &[Sample]) -> Table {
     report
 }
 
-fn metrics_summary_table(samples: &[MetricSample]) -> Table {
-    let mut table = themed_table();
-    table.set_header(header_cells(&["Metric", "Source", "Value", "Details"]));
+fn cpu_window_table(
+    bucket_seconds: i64,
+    usage: &BTreeMap<DateTime<Local>, NumberStats>,
+    freq: &BTreeMap<DateTime<Local>, NumberStats>,
+) -> Table {
+    let mut report = themed_table();
+    report.set_header(header_cells(&[
+        "Window",
+        "Samples",
+        "Avg usage",
+        "Peak usage",
+        "Avg freq",
+        "Peak freq",
+    ]));
 
-    if samples.is_empty() {
-        table.add_row(vec![
-            label_cell("none"),
-            value_cell("--"),
-            value_cell("--"),
-            Cell::new("--"),
+    let mut keys: Vec<DateTime<Local>> = usage.keys().chain(freq.keys()).copied().collect();
+    keys.sort();
+    keys.dedup();
+
+    for key in keys {
+        let usage_stats = usage.get(&key).cloned().unwrap_or_default();
+        let freq_stats = freq.get(&key).cloned().unwrap_or_default();
+        let samples = usage_stats.count.max(freq_stats.count);
+        report.add_row(vec![
+            Cell::new(format_bucket(key, bucket_seconds))
+                .fg(Color::Magenta)
+                .add_attribute(Attribute::Bold),
+            value_cell(samples),
+            value_cell(format_percent(usage_stats.average())),
+            value_cell(format_percent(usage_stats.max())),
+            value_cell(format_freq(freq_stats.average())),
+            value_cell(format_freq(freq_stats.max())),
         ]);
-        return table;
     }
-
-    for sample in latest_metrics(samples) {
-        table.add_row(vec![
-            label_cell(kind_label(&sample.kind)),
-            value_cell(sample.source.clone()),
-            value_cell(format_metric_value(&sample)),
-            Cell::new(format_metric_details(&sample)),
-        ]);
-    }
-
-    table
+    report
 }
 
-fn latest_metrics(samples: &[MetricSample]) -> Vec<MetricSample> {
-    use std::collections::HashMap;
+fn gpu_window_table(
+    bucket_seconds: i64,
+    usage: &BTreeMap<DateTime<Local>, NumberStats>,
+    freq: &BTreeMap<DateTime<Local>, NumberStats>,
+) -> Table {
+    let mut report = themed_table();
+    report.set_header(header_cells(&[
+        "Window",
+        "Samples",
+        "Avg usage",
+        "Peak usage",
+        "Avg freq",
+        "Peak freq",
+    ]));
 
-    let mut latest: HashMap<(MetricKind, String), &MetricSample> = HashMap::new();
-    for sample in samples {
-        let key = (sample.kind.clone(), sample.source.clone());
-        match latest.get(&key) {
-            Some(existing) if existing.ts >= sample.ts => {}
-            _ => {
-                latest.insert(key, sample);
-            }
-        }
+    let mut keys: Vec<DateTime<Local>> = usage.keys().chain(freq.keys()).copied().collect();
+    keys.sort();
+    keys.dedup();
+
+    for key in keys {
+        let usage_stats = usage.get(&key).cloned().unwrap_or_default();
+        let freq_stats = freq.get(&key).cloned().unwrap_or_default();
+        let samples = usage_stats.count.max(freq_stats.count);
+        report.add_row(vec![
+            Cell::new(format_bucket(key, bucket_seconds))
+                .fg(Color::Magenta)
+                .add_attribute(Attribute::Bold),
+            value_cell(samples),
+            value_cell(format_percent(usage_stats.average())),
+            value_cell(format_percent(usage_stats.max())),
+            value_cell(format_freq(freq_stats.average())),
+            value_cell(format_freq(freq_stats.max())),
+        ]);
     }
-    let mut out: Vec<MetricSample> = latest.into_values().cloned().collect();
-    out.sort_by(|a, b| {
-        a.kind
-            .as_str()
-            .cmp(b.kind.as_str())
-            .then_with(|| a.source.cmp(&b.source))
-    });
-    out
+    report
 }
 
-fn kind_label(kind: &MetricKind) -> &'static str {
-    match kind {
-        MetricKind::CpuUsage => "CPU usage",
-        MetricKind::CpuFrequency => "CPU freq",
-        MetricKind::GpuUsage => "GPU usage",
-        MetricKind::GpuFrequency => "GPU freq",
-        MetricKind::NetworkBytes => "Network",
-        MetricKind::MemoryUsage => "Memory",
-        MetricKind::DiskUsage => "Disk",
-        MetricKind::Temperature => "Temperature",
-        MetricKind::PowerDraw => "Power draw",
+fn memory_window_table(
+    bucket_seconds: i64,
+    buckets: &BTreeMap<DateTime<Local>, UsageStats>,
+) -> Table {
+    let mut report = themed_table();
+    report.set_header(header_cells(&[
+        "Window",
+        "Samples",
+        "Avg used",
+        "Avg used %",
+        "Peak used %",
+    ]));
+
+    for (key, stats) in buckets {
+        report.add_row(vec![
+            Cell::new(format_bucket(*key, bucket_seconds))
+                .fg(Color::Magenta)
+                .add_attribute(Attribute::Bold),
+            value_cell(stats.used.count),
+            value_cell(format_opt_bytes(stats.used.average())),
+            value_cell(format_percent(stats.percent.average())),
+            value_cell(format_percent(stats.percent.max())),
+        ]);
     }
+    report
+}
+
+fn disk_window_table(
+    bucket_seconds: i64,
+    buckets: &BTreeMap<DateTime<Local>, UsageStats>,
+) -> Table {
+    let mut report = themed_table();
+    report.set_header(header_cells(&[
+        "Window",
+        "Samples",
+        "Avg used",
+        "Avg used %",
+        "Peak used %",
+    ]));
+
+    for (key, stats) in buckets {
+        report.add_row(vec![
+            Cell::new(format_bucket(*key, bucket_seconds))
+                .fg(Color::Magenta)
+                .add_attribute(Attribute::Bold),
+            value_cell(stats.used.count),
+            value_cell(format_opt_bytes(stats.used.average())),
+            value_cell(format_percent(stats.percent.average())),
+            value_cell(format_percent(stats.percent.max())),
+        ]);
+    }
+    report
+}
+
+fn temperature_window_table(
+    bucket_seconds: i64,
+    buckets: &BTreeMap<DateTime<Local>, NumberStats>,
+) -> Table {
+    let mut report = themed_table();
+    report.set_header(header_cells(&[
+        "Window",
+        "Samples",
+        "Avg temp",
+        "Peak temp",
+    ]));
+
+    for (key, stats) in buckets {
+        report.add_row(vec![
+            Cell::new(format_bucket(*key, bucket_seconds))
+                .fg(Color::Magenta)
+                .add_attribute(Attribute::Bold),
+            value_cell(stats.count),
+            value_cell(
+                stats
+                    .average()
+                    .map(|v| format!("{v:.1}C"))
+                    .unwrap_or_else(|| "--".to_string()),
+            ),
+            value_cell(
+                stats
+                    .max()
+                    .map(|v| format!("{v:.1}C"))
+                    .unwrap_or_else(|| "--".to_string()),
+            ),
+        ]);
+    }
+    report
+}
+
+fn network_window_table(
+    bucket_seconds: i64,
+    buckets: &BTreeMap<DateTime<Local>, RateStats>,
+) -> Table {
+    let mut report = themed_table();
+    report.set_header(header_cells(&[
+        "Window",
+        "Samples",
+        "Avg down",
+        "Peak down",
+        "Avg up",
+        "Peak up",
+    ]));
+
+    for (key, stats) in buckets {
+        let samples = stats.rx.count.max(stats.tx.count);
+        report.add_row(vec![
+            Cell::new(format_bucket(*key, bucket_seconds))
+                .fg(Color::Magenta)
+                .add_attribute(Attribute::Bold),
+            value_cell(samples),
+            value_cell(format_rate(stats.rx.average())),
+            value_cell(format_rate(stats.rx.max())),
+            value_cell(format_rate(stats.tx.average())),
+            value_cell(format_rate(stats.tx.max())),
+        ]);
+    }
+    report
 }
 
 fn format_bytes(value: f64) -> String {
@@ -421,46 +1076,6 @@ fn number_from_details(sample: &MetricSample, key: &str) -> Option<f64> {
         .and_then(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
 }
 
-fn format_metric_value(sample: &MetricSample) -> String {
-    match (sample.value, sample.unit.as_deref()) {
-        (Some(v), Some("bytes")) => format_bytes(v),
-        (Some(v), Some("%")) => format!("{v:.1}%"),
-        (Some(v), Some("MHz")) => format!("{v:.0}MHz"),
-        (Some(v), Some("W")) => format!("{v:.2}W"),
-        (Some(v), Some("C")) => format!("{v:.1}C"),
-        (Some(v), Some(unit)) => format!("{v:.2}{unit}"),
-        (Some(v), None) => format!("{v:.2}"),
-        _ => "--".to_string(),
-    }
-}
-
-fn format_metric_details(sample: &MetricSample) -> String {
-    match sample.kind {
-        MetricKind::NetworkBytes => {
-            let rx = format_opt_bytes(number_from_details(sample, "rx_bytes"));
-            let tx = format_opt_bytes(number_from_details(sample, "tx_bytes"));
-            format!("rx {rx}, tx {tx}")
-        }
-        MetricKind::MemoryUsage => {
-            let used = format_opt_bytes(number_from_details(sample, "used_bytes"));
-            let total = format_opt_bytes(number_from_details(sample, "total_bytes"));
-            let avail = format_opt_bytes(number_from_details(sample, "available_bytes"));
-            format!("used {used} / {total} (avail {avail})")
-        }
-        MetricKind::DiskUsage => {
-            let used = format_metric_value(sample);
-            let total = format_opt_bytes(number_from_details(sample, "total_bytes"));
-            let avail = format_opt_bytes(number_from_details(sample, "available_bytes"));
-            format!("{used} used of {total} (avail {avail})")
-        }
-        _ => sample
-            .details
-            .as_object()
-            .map(|_| "--".to_string())
-            .unwrap_or_else(|| "--".to_string()),
-    }
-}
-
 fn pct_stats(values: &[f64]) -> (String, String, String) {
     if values.is_empty() {
         return ("--".to_string(), "--".to_string(), "--".to_string());
@@ -487,5 +1102,66 @@ fn format_bucket(dt: DateTime<Local>, bucket_seconds: i64) -> String {
         } else {
             format!("{} (+{days}d)", dt.format("%Y-%m-%d"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn metric_sample(
+        kind: MetricKind,
+        ts: f64,
+        value: Option<f64>,
+        details: serde_json::Value,
+    ) -> MetricSample {
+        MetricSample {
+            ts,
+            kind,
+            source: "test".to_string(),
+            value,
+            unit: None,
+            details,
+        }
+    }
+
+    #[test]
+    fn network_rates_compute_per_second() {
+        let metrics = vec![
+            metric_sample(
+                MetricKind::NetworkBytes,
+                0.0,
+                Some(1000.0),
+                json!({"rx_bytes": 1_000.0, "tx_bytes": 500.0}),
+            ),
+            metric_sample(
+                MetricKind::NetworkBytes,
+                10.0,
+                Some(4000.0),
+                json!({"rx_bytes": 3_000.0, "tx_bytes": 1_500.0}),
+            ),
+        ];
+
+        let rates = compute_network_rates(&metrics);
+        assert_eq!(rates.len(), 1);
+        let rate = &rates[0];
+        assert!((rate.rx_rate.unwrap() - 200.0).abs() < 1e-6);
+        assert!((rate.tx_rate.unwrap() - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn usage_stats_compute_percentage() {
+        let metrics = vec![metric_sample(
+            MetricKind::MemoryUsage,
+            0.0,
+            Some(2048.0),
+            json!({"total_bytes": 4096.0}),
+        )];
+
+        let stats = usage_stats_for_kind(&metrics, MetricKind::MemoryUsage);
+        assert_eq!(stats.used.count, 1);
+        assert!((stats.used.average().unwrap() - 2048.0).abs() < 1e-6);
+        assert!((stats.percent.average().unwrap() - 50.0).abs() < 1e-6);
     }
 }
