@@ -109,51 +109,39 @@ fn build_charts(
     }
 
     if presets.contains(&ReportPreset::Cpu) {
-        let usage = aggregate_metric_series(metrics, MetricKind::CpuUsage, |v, _| v);
+        let usage = aggregate_metric_series_by_source(metrics, MetricKind::CpuUsage, |v, _| v);
         if !usage.is_empty() {
             charts.push(ChartSpec {
                 title: format!("CPU usage ({label})"),
                 y_desc: "Percent".to_string(),
-                series: vec![MetricSeries {
-                    label: "Usage".to_string(),
-                    points: usage,
-                }],
+                series: usage,
             });
         }
-        let freq = aggregate_metric_series(metrics, MetricKind::CpuFrequency, |v, _| v);
+        let freq = aggregate_metric_series_by_source(metrics, MetricKind::CpuFrequency, |v, _| v);
         if !freq.is_empty() {
             charts.push(ChartSpec {
                 title: format!("CPU frequency ({label})"),
                 y_desc: "MHz".to_string(),
-                series: vec![MetricSeries {
-                    label: "Clock".to_string(),
-                    points: freq,
-                }],
+                series: freq,
             });
         }
     }
 
     if presets.contains(&ReportPreset::Gpu) {
-        let usage = aggregate_metric_series(metrics, MetricKind::GpuUsage, |v, _| v);
+        let usage = aggregate_metric_series_by_source(metrics, MetricKind::GpuUsage, |v, _| v);
         if !usage.is_empty() {
             charts.push(ChartSpec {
                 title: format!("GPU usage ({label})"),
                 y_desc: "Percent".to_string(),
-                series: vec![MetricSeries {
-                    label: "Usage".to_string(),
-                    points: usage,
-                }],
+                series: usage,
             });
         }
-        let freq = aggregate_metric_series(metrics, MetricKind::GpuFrequency, |v, _| v);
+        let freq = aggregate_metric_series_by_source(metrics, MetricKind::GpuFrequency, |v, _| v);
         if !freq.is_empty() {
             charts.push(ChartSpec {
                 title: format!("GPU frequency ({label})"),
                 y_desc: "MHz".to_string(),
-                series: vec![MetricSeries {
-                    label: "Clock".to_string(),
-                    points: freq,
-                }],
+                series: freq,
             });
         }
     }
@@ -214,15 +202,12 @@ fn build_charts(
     }
 
     if presets.contains(&ReportPreset::Temperature) {
-        let temps = aggregate_metric_series(metrics, MetricKind::Temperature, |v, _| v);
+        let temps = aggregate_metric_series_by_source(metrics, MetricKind::Temperature, |v, _| v);
         if !temps.is_empty() {
             charts.push(ChartSpec {
                 title: format!("Temperature ({label})"),
                 y_desc: "Celsius".to_string(),
-                series: vec![MetricSeries {
-                    label: "Sensor".to_string(),
-                    points: temps,
-                }],
+                series: temps,
             });
         }
     }
@@ -334,6 +319,48 @@ where
         .collect()
 }
 
+fn aggregate_metric_series_by_source<F>(
+    metrics: &[MetricSample],
+    kind: MetricKind,
+    mut map_value: F,
+) -> Vec<MetricSeries>
+where
+    F: FnMut(f64, &MetricSample) -> f64,
+{
+    let mut grouped: BTreeMap<String, BTreeMap<OrderedFloat<f64>, Vec<f64>>> = BTreeMap::new();
+    for sample in metrics.iter().filter(|m| m.kind == kind) {
+        if let Some(value) = sample.value {
+            grouped
+                .entry(sample.source.clone())
+                .or_default()
+                .entry(OrderedFloat(sample.ts))
+                .or_default()
+                .push(map_value(value, sample));
+        }
+    }
+
+    let mut series = Vec::new();
+    for (source, buckets) in grouped {
+        let mut points = Vec::new();
+        for (ts, values) in buckets {
+            if values.is_empty() {
+                continue;
+            }
+            let avg = values.iter().sum::<f64>() / values.len() as f64;
+            if let Some(dt) = ts_to_datetime(ts.into_inner()) {
+                points.push((dt, avg));
+            }
+        }
+        if !points.is_empty() {
+            series.push(MetricSeries {
+                label: source,
+                points,
+            });
+        }
+    }
+    series
+}
+
 fn network_rate_series(metrics: &[MetricSample]) -> (SeriesPoints, SeriesPoints) {
     let mut by_iface: BTreeMap<&str, Vec<&MetricSample>> = BTreeMap::new();
     for sample in metrics
@@ -403,4 +430,36 @@ fn ts_to_datetime(ts: f64) -> Option<DateTime<Utc>> {
     let seconds = ts.trunc() as i64;
     let nanos = ((ts.fract() * 1_000_000_000.0).round() as u32).min(999_999_999);
     Utc.timestamp_opt(seconds, nanos).single()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metric_sample(source: &str, ts: f64, value: f64, kind: MetricKind) -> MetricSample {
+        MetricSample {
+            ts,
+            kind,
+            source: source.to_string(),
+            value: Some(value),
+            unit: None,
+            details: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn aggregate_metric_series_is_per_source() {
+        let metrics = vec![
+            metric_sample("cpu0", 0.0, 10.0, MetricKind::CpuUsage),
+            metric_sample("cpu1", 0.0, 20.0, MetricKind::CpuUsage),
+            metric_sample("cpu0", 60.0, 30.0, MetricKind::CpuUsage),
+        ];
+
+        let series = aggregate_metric_series_by_source(&metrics, MetricKind::CpuUsage, |v, _| v);
+        assert_eq!(series.len(), 2);
+        let cpu0 = series.iter().find(|s| s.label == "cpu0").unwrap();
+        let cpu1 = series.iter().find(|s| s.label == "cpu1").unwrap();
+        assert_eq!(cpu0.points.len(), 2);
+        assert_eq!(cpu1.points.len(), 1);
+    }
 }

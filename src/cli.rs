@@ -80,6 +80,9 @@ pub enum Commands {
         /// Custom path for the graph image (png/pdf/etc); overrides --graph name
         #[arg(long = "graph-path")]
         graph_path: Option<PathBuf>,
+        /// Limit metrics to specific sensor names (repeatable)
+        #[arg(long = "sensor", value_name = "NAME", num_args = 0..)]
+        sensor_filters: Vec<String>,
         /// Which report presets to render (repeatable)
         #[arg(
             long = "preset",
@@ -187,6 +190,7 @@ where
             graph: graph_flag,
             graph_path,
             presets,
+            sensor_filters,
             verbose,
         } => {
             configure_logging(verbose);
@@ -211,6 +215,7 @@ where
                 };
             let metric_samples =
                 db::fetch_metric_samples(&resolved, since_ts, Some(&metric_kinds))?;
+            let metric_samples = filter_metrics_by_source(&metric_samples, &sensor_filters);
             let timeframe_record_count = raw_samples.len();
             let samples = aggregate_samples_by_timestamp(&raw_samples);
             let has_selected_data = presets
@@ -273,7 +278,8 @@ fn summarize(
     presets: &[ReportPreset],
 ) {
     let timeframe_label = timeframe.label.replace('_', " ");
-    let bucket_seconds = bucket_span_seconds(timeframe);
+    let bucket_seconds =
+        bucket_span_seconds(timeframe, data_span_seconds(timeframe_samples, metrics));
     let battery_rates = average_rates(timeframe_samples);
     let power_draw_stats = average_for_kind(metrics, MetricKind::PowerDraw);
     let avg_discharge_w = power_draw_stats.average().or(battery_rates.discharge_w);
@@ -308,8 +314,10 @@ fn summarize(
     }
 
     if presets.contains(&ReportPreset::Cpu) {
-        let usage_buckets = bucket_stats_for_kind(metrics, MetricKind::CpuUsage, bucket_seconds);
-        let freq_buckets = bucket_stats_for_kind(metrics, MetricKind::CpuFrequency, bucket_seconds);
+        let usage_buckets =
+            bucket_stats_for_kind_by_source(metrics, MetricKind::CpuUsage, bucket_seconds);
+        let freq_buckets =
+            bucket_stats_for_kind_by_source(metrics, MetricKind::CpuFrequency, bucket_seconds);
         if usage_buckets.is_empty() && freq_buckets.is_empty() {
             println!("\nNo CPU samples available for {timeframe_label}.");
         } else {
@@ -322,8 +330,10 @@ fn summarize(
     }
 
     if presets.contains(&ReportPreset::Gpu) {
-        let usage_buckets = bucket_stats_for_kind(metrics, MetricKind::GpuUsage, bucket_seconds);
-        let freq_buckets = bucket_stats_for_kind(metrics, MetricKind::GpuFrequency, bucket_seconds);
+        let usage_buckets =
+            bucket_stats_for_kind_by_source(metrics, MetricKind::GpuUsage, bucket_seconds);
+        let freq_buckets =
+            bucket_stats_for_kind_by_source(metrics, MetricKind::GpuFrequency, bucket_seconds);
         if usage_buckets.is_empty() && freq_buckets.is_empty() {
             println!("\nNo GPU samples available for {timeframe_label}.");
         } else {
@@ -375,7 +385,8 @@ fn summarize(
     }
 
     if presets.contains(&ReportPreset::Temperature) {
-        let temp_buckets = bucket_stats_for_kind(metrics, MetricKind::Temperature, bucket_seconds);
+        let temp_buckets =
+            bucket_stats_for_kind_by_source(metrics, MetricKind::Temperature, bucket_seconds);
         if temp_buckets.is_empty() {
             println!("\nNo temperature samples available for {timeframe_label}.");
         } else {
@@ -524,6 +535,62 @@ fn average_for_kind(metrics: &[MetricSample], kind: MetricKind) -> NumberStats {
         stats.record_opt(sample.value);
     }
     stats
+}
+
+fn filter_metrics_by_source(
+    metrics: &[MetricSample],
+    sensor_filters: &[String],
+) -> Vec<MetricSample> {
+    if sensor_filters.is_empty() {
+        return metrics.to_vec();
+    }
+    metrics
+        .iter()
+        .filter(|m| sensor_filters.iter().any(|f| f == &m.source))
+        .cloned()
+        .collect()
+}
+
+type SourceBuckets = BTreeMap<String, BTreeMap<DateTime<Local>, NumberStats>>;
+
+fn bucket_stats_for_kind_by_source(
+    metrics: &[MetricSample],
+    kind: MetricKind,
+    bucket_seconds: i64,
+) -> SourceBuckets {
+    let mut buckets: SourceBuckets = BTreeMap::new();
+    for sample in metrics.iter().filter(|s| s.kind == kind) {
+        if let Some(value) = sample.value {
+            let bucket = bucket_start(sample.ts, bucket_seconds);
+            buckets
+                .entry(sample.source.clone())
+                .or_default()
+                .entry(bucket)
+                .or_default()
+                .record(value);
+        }
+    }
+    buckets
+}
+
+fn data_span_seconds(samples: &[Sample], metrics: &[MetricSample]) -> Option<f64> {
+    let mut min_ts = f64::INFINITY;
+    let mut max_ts = f64::NEG_INFINITY;
+
+    for ts in samples
+        .iter()
+        .map(|s| s.ts)
+        .chain(metrics.iter().map(|m| m.ts))
+    {
+        min_ts = min_ts.min(ts);
+        max_ts = max_ts.max(ts);
+    }
+
+    if max_ts.is_finite() && min_ts.is_finite() && max_ts >= min_ts {
+        Some(max_ts - min_ts)
+    } else {
+        None
+    }
 }
 
 fn bucket_stats_for_kind(
@@ -722,13 +789,10 @@ fn battery_stats_table(
     report
 }
 
-fn cpu_stats_table(
-    bucket_seconds: i64,
-    usage: &BTreeMap<DateTime<Local>, NumberStats>,
-    freq: &BTreeMap<DateTime<Local>, NumberStats>,
-) -> Table {
+fn cpu_stats_table(bucket_seconds: i64, usage: &SourceBuckets, freq: &SourceBuckets) -> Table {
     let mut report = themed_table();
     report.set_header(header_cells(&[
+        "Source",
         "Window",
         "Samples",
         "Min usage",
@@ -739,37 +803,51 @@ fn cpu_stats_table(
         "Peak freq",
     ]));
 
-    let mut keys: Vec<DateTime<Local>> = usage.keys().chain(freq.keys()).copied().collect();
-    keys.sort();
-    keys.dedup();
+    let mut sources: Vec<&String> = usage.keys().chain(freq.keys()).collect();
+    sources.sort();
+    sources.dedup();
 
-    for key in keys {
-        let usage_stats = usage.get(&key).cloned().unwrap_or_default();
-        let freq_stats = freq.get(&key).cloned().unwrap_or_default();
-        let samples = usage_stats.count.max(freq_stats.count);
-        report.add_row(vec![
-            Cell::new(format_bucket(key, bucket_seconds))
-                .fg(Color::Magenta)
-                .add_attribute(Attribute::Bold),
-            value_cell(samples),
-            value_cell(format_percent(usage_stats.min())),
-            value_cell(format_percent(usage_stats.average())),
-            value_cell(format_percent(usage_stats.max())),
-            value_cell(format_freq(freq_stats.min())),
-            value_cell(format_freq(freq_stats.average())),
-            value_cell(format_freq(freq_stats.max())),
-        ]);
+    for source in sources {
+        let usage_buckets = usage.get(source);
+        let freq_buckets = freq.get(source);
+        let mut keys: Vec<DateTime<Local>> = usage_buckets
+            .into_iter()
+            .flat_map(|m| m.keys().copied())
+            .chain(freq_buckets.into_iter().flat_map(|m| m.keys().copied()))
+            .collect();
+        keys.sort();
+        keys.dedup();
+
+        for key in keys {
+            let usage_stats = usage_buckets
+                .and_then(|map| map.get(&key).cloned())
+                .unwrap_or_default();
+            let freq_stats = freq_buckets
+                .and_then(|map| map.get(&key).cloned())
+                .unwrap_or_default();
+            let samples = usage_stats.count.max(freq_stats.count);
+            report.add_row(vec![
+                label_cell(source),
+                Cell::new(format_bucket(key, bucket_seconds))
+                    .fg(Color::Magenta)
+                    .add_attribute(Attribute::Bold),
+                value_cell(samples),
+                value_cell(format_percent(usage_stats.min())),
+                value_cell(format_percent(usage_stats.average())),
+                value_cell(format_percent(usage_stats.max())),
+                value_cell(format_freq(freq_stats.min())),
+                value_cell(format_freq(freq_stats.average())),
+                value_cell(format_freq(freq_stats.max())),
+            ]);
+        }
     }
     report
 }
 
-fn gpu_stats_table(
-    bucket_seconds: i64,
-    usage: &BTreeMap<DateTime<Local>, NumberStats>,
-    freq: &BTreeMap<DateTime<Local>, NumberStats>,
-) -> Table {
+fn gpu_stats_table(bucket_seconds: i64, usage: &SourceBuckets, freq: &SourceBuckets) -> Table {
     let mut report = themed_table();
     report.set_header(header_cells(&[
+        "Source",
         "Window",
         "Samples",
         "Min usage",
@@ -780,26 +858,43 @@ fn gpu_stats_table(
         "Peak freq",
     ]));
 
-    let mut keys: Vec<DateTime<Local>> = usage.keys().chain(freq.keys()).copied().collect();
-    keys.sort();
-    keys.dedup();
+    let mut sources: Vec<&String> = usage.keys().chain(freq.keys()).collect();
+    sources.sort();
+    sources.dedup();
 
-    for key in keys {
-        let usage_stats = usage.get(&key).cloned().unwrap_or_default();
-        let freq_stats = freq.get(&key).cloned().unwrap_or_default();
-        let samples = usage_stats.count.max(freq_stats.count);
-        report.add_row(vec![
-            Cell::new(format_bucket(key, bucket_seconds))
-                .fg(Color::Magenta)
-                .add_attribute(Attribute::Bold),
-            value_cell(samples),
-            value_cell(format_percent(usage_stats.min())),
-            value_cell(format_percent(usage_stats.average())),
-            value_cell(format_percent(usage_stats.max())),
-            value_cell(format_freq(freq_stats.min())),
-            value_cell(format_freq(freq_stats.average())),
-            value_cell(format_freq(freq_stats.max())),
-        ]);
+    for source in sources {
+        let usage_buckets = usage.get(source);
+        let freq_buckets = freq.get(source);
+        let mut keys: Vec<DateTime<Local>> = usage_buckets
+            .into_iter()
+            .flat_map(|m| m.keys().copied())
+            .chain(freq_buckets.into_iter().flat_map(|m| m.keys().copied()))
+            .collect();
+        keys.sort();
+        keys.dedup();
+
+        for key in keys {
+            let usage_stats = usage_buckets
+                .and_then(|map| map.get(&key).cloned())
+                .unwrap_or_default();
+            let freq_stats = freq_buckets
+                .and_then(|map| map.get(&key).cloned())
+                .unwrap_or_default();
+            let samples = usage_stats.count.max(freq_stats.count);
+            report.add_row(vec![
+                label_cell(source),
+                Cell::new(format_bucket(key, bucket_seconds))
+                    .fg(Color::Magenta)
+                    .add_attribute(Attribute::Bold),
+                value_cell(samples),
+                value_cell(format_percent(usage_stats.min())),
+                value_cell(format_percent(usage_stats.average())),
+                value_cell(format_percent(usage_stats.max())),
+                value_cell(format_freq(freq_stats.min())),
+                value_cell(format_freq(freq_stats.average())),
+                value_cell(format_freq(freq_stats.max())),
+            ]);
+        }
     }
     report
 }
@@ -863,12 +958,10 @@ fn disk_stats_table(bucket_seconds: i64, buckets: &BTreeMap<DateTime<Local>, Usa
     report
 }
 
-fn temperature_stats_table(
-    bucket_seconds: i64,
-    buckets: &BTreeMap<DateTime<Local>, NumberStats>,
-) -> Table {
+fn temperature_stats_table(bucket_seconds: i64, buckets: &SourceBuckets) -> Table {
     let mut report = themed_table();
     report.set_header(header_cells(&[
+        "Source",
         "Window",
         "Samples",
         "Min temp",
@@ -876,31 +969,34 @@ fn temperature_stats_table(
         "Peak temp",
     ]));
 
-    for (key, stats) in buckets {
-        report.add_row(vec![
-            Cell::new(format_bucket(*key, bucket_seconds))
-                .fg(Color::Magenta)
-                .add_attribute(Attribute::Bold),
-            value_cell(stats.count),
-            value_cell(
-                stats
-                    .min()
-                    .map(|v| format!("{v:.1}C"))
-                    .unwrap_or_else(|| "--".to_string()),
-            ),
-            value_cell(
-                stats
-                    .average()
-                    .map(|v| format!("{v:.1}C"))
-                    .unwrap_or_else(|| "--".to_string()),
-            ),
-            value_cell(
-                stats
-                    .max()
-                    .map(|v| format!("{v:.1}C"))
-                    .unwrap_or_else(|| "--".to_string()),
-            ),
-        ]);
+    for (source, readings) in buckets {
+        for (key, stats) in readings {
+            report.add_row(vec![
+                label_cell(source),
+                Cell::new(format_bucket(*key, bucket_seconds))
+                    .fg(Color::Magenta)
+                    .add_attribute(Attribute::Bold),
+                value_cell(stats.count),
+                value_cell(
+                    stats
+                        .min()
+                        .map(|v| format!("{v:.1}C"))
+                        .unwrap_or_else(|| "--".to_string()),
+                ),
+                value_cell(
+                    stats
+                        .average()
+                        .map(|v| format!("{v:.1}C"))
+                        .unwrap_or_else(|| "--".to_string()),
+                ),
+                value_cell(
+                    stats
+                        .max()
+                        .map(|v| format!("{v:.1}C"))
+                        .unwrap_or_else(|| "--".to_string()),
+                ),
+            ]);
+        }
     }
     report
 }
@@ -998,8 +1094,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn metric_sample(
+    fn metric_sample_with_source(
         kind: MetricKind,
+        source: &str,
         ts: f64,
         value: Option<f64>,
         details: serde_json::Value,
@@ -1007,11 +1104,20 @@ mod tests {
         MetricSample {
             ts,
             kind,
-            source: "test".to_string(),
+            source: source.to_string(),
             value,
             unit: None,
             details,
         }
+    }
+
+    fn metric_sample(
+        kind: MetricKind,
+        ts: f64,
+        value: Option<f64>,
+        details: serde_json::Value,
+    ) -> MetricSample {
+        metric_sample_with_source(kind, "test", ts, value, details)
     }
 
     #[test]
@@ -1036,6 +1142,44 @@ mod tests {
         let rate = &rates[0];
         assert!((rate.rx_rate.unwrap() - 200.0).abs() < 1e-6);
         assert!((rate.tx_rate.unwrap() - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bucket_stats_are_kept_per_source() {
+        let metrics = vec![
+            metric_sample_with_source(MetricKind::Temperature, "cpu0", 0.0, Some(30.0), json!({})),
+            metric_sample_with_source(MetricKind::Temperature, "cpu1", 0.0, Some(40.0), json!({})),
+            metric_sample_with_source(MetricKind::Temperature, "cpu0", 60.0, Some(50.0), json!({})),
+        ];
+
+        let buckets = bucket_stats_for_kind_by_source(&metrics, MetricKind::Temperature, 60);
+        assert_eq!(buckets.len(), 2);
+        let cpu0_count: usize = buckets
+            .get("cpu0")
+            .unwrap()
+            .values()
+            .map(|stats| stats.count)
+            .sum();
+        let cpu1_count: usize = buckets
+            .get("cpu1")
+            .unwrap()
+            .values()
+            .map(|stats| stats.count)
+            .sum();
+        assert_eq!(cpu0_count, 2);
+        assert_eq!(cpu1_count, 1);
+    }
+
+    #[test]
+    fn metrics_can_be_filtered_by_source() {
+        let metrics = vec![
+            metric_sample_with_source(MetricKind::CpuUsage, "cpu0", 0.0, Some(10.0), json!({})),
+            metric_sample_with_source(MetricKind::CpuUsage, "cpu1", 0.0, Some(20.0), json!({})),
+        ];
+
+        let filtered = filter_metrics_by_source(&metrics, &["cpu1".to_string()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].source, "cpu1");
     }
 
     #[test]

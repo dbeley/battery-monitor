@@ -43,16 +43,20 @@ pub fn default_graph_path(
         .join(filename)
 }
 
-pub fn bucket_span_seconds(timeframe: &Timeframe) -> i64 {
-    match timeframe.seconds {
-        None => 7 * 24 * 3600,
-        Some(window) if window <= 2.0 * 3600.0 => 5 * 60,
-        Some(window) if window <= 6.0 * 3600.0 => 10 * 60,
-        Some(window) if window <= 24.0 * 3600.0 => 3600,
-        Some(window) if window <= 3.0 * 24.0 * 3600.0 => 2 * 3600,
-        Some(window) if window <= 7.0 * 24.0 * 3600.0 => 6 * 3600,
-        Some(window) if window <= 30.0 * 24.0 * 3600.0 => 24 * 3600,
-        Some(window) if window <= 90.0 * 24.0 * 3600.0 => 3 * 24 * 3600,
+pub fn bucket_span_seconds(timeframe: &Timeframe, data_span_seconds: Option<f64>) -> i64 {
+    let window = timeframe
+        .seconds
+        .or(data_span_seconds)
+        .unwrap_or(7.0 * 24.0 * 3600.0);
+
+    match window {
+        w if w <= 2.0 * 3600.0 => 5 * 60,
+        w if w <= 6.0 * 3600.0 => 10 * 60,
+        w if w <= 24.0 * 3600.0 => 3600,
+        w if w <= 3.0 * 24.0 * 3600.0 => 2 * 3600,
+        w if w <= 7.0 * 24.0 * 3600.0 => 6 * 3600,
+        w if w <= 30.0 * 24.0 * 3600.0 => 24 * 3600,
+        w if w <= 90.0 * 24.0 * 3600.0 => 3 * 24 * 3600,
         _ => 7 * 24 * 3600,
     }
 }
@@ -298,7 +302,7 @@ mod tests {
     fn bucket_alignment_matches_expected_windows() {
         use crate::timeframe::build_timeframe;
         let timeframe = build_timeframe(6, 0, 0, false).unwrap();
-        let span = bucket_span_seconds(&timeframe);
+        let span = bucket_span_seconds(&timeframe, None);
         let sample_dt = Local::now()
             .with_minute(37)
             .unwrap()
@@ -313,7 +317,7 @@ mod tests {
         assert_eq!(bucket.second(), 0);
 
         let one_day = build_timeframe(0, 1, 0, false).unwrap();
-        let span_day = bucket_span_seconds(&one_day);
+        let span_day = bucket_span_seconds(&one_day, None);
         let bucket_day = bucket_start(sample_dt.timestamp() as f64, span_day);
         assert_eq!(span_day, 3600);
         assert_eq!(bucket_day.hour(), sample_dt.hour());
@@ -325,7 +329,7 @@ mod tests {
     fn short_timeframes_use_five_minute_buckets() {
         use crate::timeframe::build_timeframe;
         let timeframe = build_timeframe(1, 0, 0, false).unwrap();
-        let span = bucket_span_seconds(&timeframe);
+        let span = bucket_span_seconds(&timeframe, None);
         let sample_dt = Local::now()
             .with_minute(12)
             .unwrap()
@@ -338,5 +342,16 @@ mod tests {
         assert_eq!(span, 5 * 60);
         assert_eq!(bucket.minute() % 5, 0);
         assert_eq!(bucket.second(), 0);
+    }
+
+    #[test]
+    fn all_time_uses_data_span_for_buckets() {
+        use crate::timeframe::build_timeframe;
+        let timeframe = build_timeframe(6, 0, 0, true).unwrap();
+        let span = bucket_span_seconds(&timeframe, Some(6.0 * 3600.0));
+        assert_eq!(span, 10 * 60);
+
+        let weekly = bucket_span_seconds(&timeframe, Some(200.0 * 24.0 * 3600.0));
+        assert_eq!(weekly, 7 * 24 * 3600);
     }
 }
